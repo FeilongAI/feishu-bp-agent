@@ -1,6 +1,8 @@
 import { validateAuthConfig } from "./auth.ts";
+import { BaseSyncWorker, isBaseOutboxStore } from "./baseSync.ts";
 import { ConfirmationService } from "./confirmation.ts";
 import { ConversationService } from "./conversation.ts";
+import { FeishuBaseClient, parseBaseFieldMap } from "./feishuBase.ts";
 import { createHttpServer } from "./http.ts";
 import { LarkCliClient } from "./lark.ts";
 import { logger } from "./logger.ts";
@@ -31,7 +33,32 @@ const server = createHttpServer(processor, store, { auth, confirmation, logger }
 const port = Number(process.env.PORT || 8090);
 const host = process.env.HOST || "127.0.0.1";
 
-server.listen(port, host, () => logger.info("server_started", { host, port }));
+let baseSyncWorker: BaseSyncWorker | undefined;
+if (process.env.BASE_SYNC_ENABLED === "true") {
+  if (!isBaseOutboxStore(store)) throw new Error("BASE_SYNC_ENABLED requires DATABASE_URL and PostgreSQL storage");
+  const required = ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_BASE_TOKEN", "FEISHU_BASE_TABLE_ID"] as const;
+  const missing = required.filter((name) => !process.env[name]);
+  if (missing.length) throw new Error(`Base sync configuration missing: ${missing.join(", ")}`);
+  const baseClient = new FeishuBaseClient({
+    appId: process.env.FEISHU_APP_ID!,
+    appSecret: process.env.FEISHU_APP_SECRET!,
+    baseToken: process.env.FEISHU_BASE_TOKEN!,
+    tableId: process.env.FEISHU_BASE_TABLE_ID!,
+    apiBaseUrl: process.env.FEISHU_API_BASE_URL,
+    fieldMap: parseBaseFieldMap(process.env.FEISHU_BASE_FIELD_MAP),
+    requestTimeoutMs: Number(process.env.FEISHU_API_TIMEOUT_MS || 15_000),
+  });
+  baseSyncWorker = new BaseSyncWorker(store, baseClient, logger, {
+    batchSize: Number(process.env.BASE_SYNC_BATCH_SIZE || 20),
+    pollIntervalMs: Number(process.env.BASE_SYNC_POLL_MS || 5_000),
+  });
+}
+
+server.listen(port, host, () => {
+  logger.info("server_started", { host, port });
+  baseSyncWorker?.start();
+  if (baseSyncWorker) logger.info("base_sync_started", { tableId: process.env.FEISHU_BASE_TABLE_ID });
+});
 
 if (process.env.RUN_LARK_CONSUMER === "true") {
   const lark = new LarkCliClient(logger);
@@ -48,6 +75,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     shuttingDown = true;
     logger.info("shutdown_started", { signal });
     server.close(async () => {
+      await baseSyncWorker?.stop();
       await store.close();
       process.exit(0);
     });

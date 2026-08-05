@@ -89,6 +89,23 @@ export interface AdminAuditEvent {
   result: "success" | "denied" | "failed";
 }
 
+export interface BaseOutboxItem {
+  id: number;
+  requirementId: string;
+  operation: "upsert" | "delete";
+  payload: Requirement | { id: string };
+  attempts: number;
+  lockToken: string;
+}
+
+export interface BaseOutboxStore {
+  claimBaseOutbox(limit: number): Promise<BaseOutboxItem[]>;
+  releaseBaseOutboxLease(lockToken: string): Promise<void>;
+  getBaseRecordId(requirementId: string): Promise<string | undefined>;
+  completeBaseOutbox(item: BaseOutboxItem, recordId?: string): Promise<void>;
+  failBaseOutbox(item: BaseOutboxItem, error: string, retryAt: Date): Promise<void>;
+}
+
 export interface RequirementStore {
   getConversation(key: string): Promise<ConversationState | undefined>;
   saveConversation(conversation: ConversationState): Promise<void>;

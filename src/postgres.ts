@@ -1,5 +1,6 @@
 import pg from "pg";
-import type { AdminAuditEvent, BotReply, ConversationState, ProcessedMessageClaim, Requirement, RequirementStatus, RequirementStore } from "./types.ts";
+import { randomUUID } from "node:crypto";
+import type { AdminAuditEvent, BaseOutboxItem, BaseOutboxStore, BotReply, ConversationState, ProcessedMessageClaim, Requirement, RequirementStatus, RequirementStore } from "./types.ts";
 
 const { Pool } = pg;
 
@@ -40,7 +41,7 @@ function toRequirement(row: Record<string, unknown>): Requirement {
   };
 }
 
-export class PostgresRequirementStore implements RequirementStore {
+export class PostgresRequirementStore implements RequirementStore, BaseOutboxStore {
   private readonly db: Queryable;
   private readonly pool?: PoolLike;
 
@@ -82,13 +83,17 @@ export class PostgresRequirementStore implements RequirementStore {
   }
 
   async createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Promise<Requirement> {
-    const result = await this.db.query(
-      `INSERT INTO bp_requirement (title, goal, scope, acceptance_criteria, requester_id, requester_name, platforms,
-       desired_date, priority, status, owner_id, owner_name, progress, visibility, source_chat_id, source_message_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-      [input.title, input.goal, input.scope, input.acceptanceCriteria, input.requesterId, input.requesterName ?? null, JSON.stringify(input.platforms), input.desiredDate ?? null, input.priority ?? null, input.status, input.ownerId ?? null, input.ownerName ?? null, input.progress ?? null, input.visibility, input.sourceChatId, input.sourceMessageId],
-    );
-    return toRequirement(result.rows[0]);
+    return this.runMutation(async (db) => {
+      const result = await db.query(
+        `INSERT INTO bp_requirement (title, goal, scope, acceptance_criteria, requester_id, requester_name, platforms,
+         desired_date, priority, status, owner_id, owner_name, progress, visibility, source_chat_id, source_message_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [input.title, input.goal, input.scope, input.acceptanceCriteria, input.requesterId, input.requesterName ?? null, JSON.stringify(input.platforms), input.desiredDate ?? null, input.priority ?? null, input.status, input.ownerId ?? null, input.ownerName ?? null, input.progress ?? null, input.visibility, input.sourceChatId, input.sourceMessageId],
+      );
+      const requirement = toRequirement(result.rows[0]);
+      await this.enqueueBaseEvent(db, requirement.id, "upsert", requirement);
+      return requirement;
+    });
   }
 
   async listRequirements(filter: Parameters<RequirementStore["listRequirements"]>[0] = {}): Promise<Requirement[]> {
@@ -111,15 +116,27 @@ export class PostgresRequirementStore implements RequirementStore {
       values.push(patch[key as keyof typeof patch] ?? null);
       updates.push(`${column} = $${values.length}`);
     }
-    if (!updates.length) return (await this.listRequirements()).find((item) => item.id === id);
+    if (!updates.length) {
+      const result = await this.db.query("SELECT * FROM bp_requirement WHERE id = $1", [id]);
+      return result.rows[0] ? toRequirement(result.rows[0]) : undefined;
+    }
     values.push(id);
-    const result = await this.db.query(`UPDATE bp_requirement SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $${values.length} RETURNING *`, values);
-    return result.rows[0] ? toRequirement(result.rows[0]) : undefined;
+    return this.runMutation(async (db) => {
+      const result = await db.query(`UPDATE bp_requirement SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $${values.length} RETURNING *`, values);
+      if (!result.rows[0]) return undefined;
+      const requirement = toRequirement(result.rows[0]);
+      await this.enqueueBaseEvent(db, requirement.id, "upsert", requirement);
+      return requirement;
+    });
   }
 
   async deleteRequirement(id: string): Promise<boolean> {
-    const result = await this.db.query("DELETE FROM bp_requirement WHERE id = $1", [id]);
-    return result.rowCount === 1;
+    return this.runMutation(async (db) => {
+      const result = await db.query("DELETE FROM bp_requirement WHERE id = $1", [id]);
+      if (result.rowCount !== 1) return false;
+      await this.enqueueBaseEvent(db, id, "delete", { id });
+      return true;
+    });
   }
 
   async claimMessage(messageId: string, conversationKey: string): Promise<ProcessedMessageClaim> {
@@ -187,6 +204,117 @@ export class PostgresRequirementStore implements RequirementStore {
       `INSERT INTO bp_admin_audit (actor_id, action, resource_id, payload, result)
        VALUES ($1, $2, $3, $4::jsonb, $5)`,
       [event.actorId, event.action, event.resourceId ?? null, JSON.stringify(event.payload ?? null), event.result],
+    );
+  }
+
+  async claimBaseOutbox(limit: number): Promise<BaseOutboxItem[]> {
+    if (!this.pool) throw new Error("base_outbox_claim_requires_pool");
+    const client = await this.pool.connect();
+    const lockToken = randomUUID();
+    try {
+      await client.query("BEGIN");
+      const lease = await client.query("SELECT lock_token, locked_until FROM bp_base_worker_lease WHERE id = 1 FOR UPDATE");
+      const lockedUntil = lease.rows[0]?.locked_until ? new Date(String(lease.rows[0].locked_until)).getTime() : 0;
+      if (lockedUntil > Date.now()) {
+        await client.query("COMMIT");
+        return [];
+      }
+      await client.query("UPDATE bp_base_worker_lease SET lock_token = $1, locked_until = NOW() + INTERVAL '10 minutes' WHERE id = 1", [lockToken]);
+      const result = await client.query(
+        `WITH candidates AS (
+           SELECT item.id FROM bp_base_outbox AS item
+           WHERE item.processed_at IS NULL AND item.next_attempt_at <= NOW() AND (item.locked_until IS NULL OR item.locked_until < NOW())
+             AND NOT EXISTS (
+               SELECT 1 FROM bp_base_outbox AS earlier
+               WHERE earlier.requirement_id = item.requirement_id AND earlier.processed_at IS NULL AND earlier.id < item.id
+             )
+           ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $1
+         )
+         UPDATE bp_base_outbox AS item
+         SET attempts = item.attempts + 1, locked_until = NOW() + INTERVAL '10 minutes', lock_token = $2
+         FROM candidates WHERE item.id = candidates.id
+         RETURNING item.id, item.requirement_id, item.operation, item.payload, item.attempts, item.lock_token`,
+        [Math.max(1, Math.min(limit, 100)), lockToken],
+      );
+      if (!result.rowCount) await client.query("UPDATE bp_base_worker_lease SET lock_token = NULL, locked_until = NULL WHERE id = 1 AND lock_token = $1", [lockToken]);
+      await client.query("COMMIT");
+      return result.rows.map((row) => ({
+        id: Number(row.id),
+        requirementId: String(row.requirement_id),
+        operation: String(row.operation) as BaseOutboxItem["operation"],
+        payload: row.payload as unknown as BaseOutboxItem["payload"],
+        attempts: Number(row.attempts),
+        lockToken: String(row.lock_token),
+      }));
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async releaseBaseOutboxLease(lockToken: string): Promise<void> {
+    await this.db.query(
+      "UPDATE bp_base_worker_lease SET lock_token = NULL, locked_until = NULL WHERE id = 1 AND lock_token = $1",
+      [lockToken],
+    );
+  }
+
+  async getBaseRecordId(requirementId: string): Promise<string | undefined> {
+    const result = await this.db.query("SELECT record_id FROM bp_base_sync_state WHERE requirement_id = $1", [requirementId]);
+    return result.rows[0] ? String(result.rows[0].record_id) : undefined;
+  }
+
+  async completeBaseOutbox(item: BaseOutboxItem, recordId?: string): Promise<void> {
+    await this.runMutation(async (db) => {
+      if (item.operation === "upsert") {
+        if (!recordId) throw new Error("record_id_required_for_upsert");
+        await db.query(
+          `INSERT INTO bp_base_sync_state (requirement_id, record_id, synced_at) VALUES ($1, $2, NOW())
+           ON CONFLICT (requirement_id) DO UPDATE SET record_id = EXCLUDED.record_id, synced_at = NOW()`,
+          [item.requirementId, recordId],
+        );
+      } else {
+        await db.query("DELETE FROM bp_base_sync_state WHERE requirement_id = $1", [item.requirementId]);
+      }
+      const completed = await db.query(
+        `UPDATE bp_base_outbox SET processed_at = NOW(), locked_until = NULL, lock_token = NULL, last_error = NULL
+         WHERE id = $1 AND lock_token = $2 AND processed_at IS NULL`,
+        [item.id, item.lockToken],
+      );
+      if (completed.rowCount !== 1) throw new Error("base_outbox_lease_lost");
+    });
+  }
+
+  async failBaseOutbox(item: BaseOutboxItem, error: string, retryAt: Date): Promise<void> {
+    await this.db.query(
+      `UPDATE bp_base_outbox SET next_attempt_at = $3, locked_until = NULL, lock_token = NULL, last_error = $4
+       WHERE id = $1 AND lock_token = $2 AND processed_at IS NULL`,
+      [item.id, item.lockToken, retryAt.toISOString(), error.slice(0, 2000)],
+    );
+  }
+
+  private async runMutation<T>(operation: (db: Queryable) => Promise<T>): Promise<T> {
+    if (!this.pool) return operation(this.db);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await operation(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async enqueueBaseEvent(db: Queryable, requirementId: string, operation: BaseOutboxItem["operation"], payload: BaseOutboxItem["payload"]): Promise<void> {
+    await db.query(
+      "INSERT INTO bp_base_outbox (requirement_id, operation, payload) VALUES ($1, $2, $3::jsonb)",
+      [requirementId, operation, JSON.stringify(payload)],
     );
   }
 

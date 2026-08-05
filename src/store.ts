@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ConversationState, Requirement, RequirementStore } from "./types.ts";
+import type { AdminAuditEvent, BotReply, ConversationState, ProcessedMessageClaim, Requirement, RequirementStore } from "./types.ts";
 
 export class InMemoryRequirementStore implements RequirementStore {
   private readonly conversations = new Map<string, ConversationState>();
   private readonly requirements = new Map<string, Requirement>();
+  private readonly processedMessages = new Map<string, { status: "processing" | "completed" | "failed"; reply?: BotReply }>();
+  private readonly locks = new Map<string, Promise<void>>();
   private readonly filePath?: string;
 
   constructor(filePath?: string) {
@@ -54,6 +56,42 @@ export class InMemoryRequirementStore implements RequirementStore {
     if (deleted) this.persist();
     return deleted;
   }
+
+  async claimMessage(messageId: string, _conversationKey: string): Promise<ProcessedMessageClaim> {
+    const existing = this.processedMessages.get(messageId);
+    if (existing?.status === "failed") {
+      this.processedMessages.set(messageId, { status: "processing" });
+      return { claimed: true, status: "processing" };
+    }
+    if (existing) return { claimed: false, ...structuredClone(existing) };
+    this.processedMessages.set(messageId, { status: "processing" });
+    return { claimed: true, status: "processing" };
+  }
+
+  async completeMessage(messageId: string, reply: BotReply): Promise<void> {
+    this.processedMessages.set(messageId, { status: "completed", reply: structuredClone(reply) });
+  }
+
+  async failMessage(messageId: string, _errorCode: string): Promise<void> {
+    this.processedMessages.set(messageId, { status: "failed" });
+  }
+
+  async withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T> {
+    const previous = this.locks.get(conversationKey) ?? Promise.resolve();
+    let release = () => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.locks.set(conversationKey, queued);
+    await previous;
+    try {
+      return await operation(this);
+    } finally {
+      release();
+      if (this.locks.get(conversationKey) === queued) this.locks.delete(conversationKey);
+    }
+  }
+
+  async recordAudit(_event: AdminAuditEvent): Promise<void> {}
 
   async healthCheck(): Promise<void> {}
 

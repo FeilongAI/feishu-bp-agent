@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import type { Logger } from "./logger.ts";
 import type { IncomingMessage } from "./types.ts";
 
 export interface LarkClient {
@@ -7,10 +8,59 @@ export interface LarkClient {
   reply(messageId: string, text: string): Promise<void>;
 }
 
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function textContent(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return typeof parsed.text === "string" ? parsed.text : raw;
+  } catch {
+    return raw;
+  }
+}
+
+export function normalizeLarkEvent(input: Record<string, unknown>): IncomingMessage | undefined {
+  const envelope = object(input.event ?? input);
+  const message = object(envelope.message ?? envelope);
+  const sender = object(envelope.sender);
+  const senderId = object(sender.sender_id);
+  const header = object(input.header);
+  const senderType = String(sender.sender_type ?? envelope.sender_type ?? "user");
+  if (senderType === "bot" || senderType === "app") return undefined;
+  const chatId = message.chat_id ?? envelope.chat_id;
+  const messageId = message.message_id ?? envelope.message_id;
+  const openId = senderId.open_id ?? envelope.sender_id;
+  if (typeof chatId !== "string" || typeof messageId !== "string" || typeof openId !== "string") return undefined;
+  const mentions = Array.isArray(message.mentions)
+    ? message.mentions.flatMap((item) => {
+      const mention = object(item);
+      const id = object(mention.id).open_id ?? mention.open_id ?? mention.id;
+      return typeof id === "string" ? [{ id, name: typeof mention.name === "string" ? mention.name : undefined }] : [];
+    })
+    : undefined;
+  return {
+    chatId,
+    chatType: message.chat_type === "group" ? "group" : "p2p",
+    tenantKey: typeof header.tenant_key === "string" ? header.tenant_key : undefined,
+    senderId: openId,
+    senderName: typeof sender.sender_name === "string" ? sender.sender_name : undefined,
+    messageId,
+    content: textContent(message.content ?? envelope.content),
+    senderType: "user",
+    threadId: typeof message.thread_id === "string" ? message.thread_id : typeof message.root_id === "string" ? message.root_id : undefined,
+    mentions,
+  };
+}
+
 export class LarkCliClient implements LarkClient {
   private readonly bin: string;
+  private readonly logger: Logger;
 
-  constructor(bin = process.env.LARK_CLI_BIN || "lark-cli") {
+  constructor(logger: Logger, bin = process.env.LARK_CLI_BIN || "lark-cli") {
+    this.logger = logger;
     this.bin = bin;
   }
 
@@ -19,14 +69,14 @@ export class LarkCliClient implements LarkClient {
     const lines = createInterface({ input: child.stdout });
     lines.on("line", (line) => {
       try {
-        const event = JSON.parse(line) as Record<string, unknown>;
-        if (event.sender_type === "bot") return;
-        void onMessage({ chatId: String(event.chat_id), senderId: String(event.sender_id), messageId: String(event.message_id), content: String(event.content ?? ""), senderType: event.sender_type === "bot" ? "bot" : "user", threadId: typeof event.thread_id === "string" ? event.thread_id : undefined });
+        const message = normalizeLarkEvent(JSON.parse(line) as Record<string, unknown>);
+        if (message) void Promise.resolve(onMessage(message)).catch((error) => this.logger.error("lark_message_callback_failed", { messageId: message.messageId, error }));
       } catch (error) {
-        process.stderr.write(`[lark] invalid event: ${String(error)}\n`);
+        this.logger.warn("lark_event_invalid", { error });
       }
     });
-    child.stderr.on("data", (chunk) => process.stderr.write(`[lark] ${chunk}`));
+    child.on("error", (error) => this.logger.error("lark_consumer_failed", { error }));
+    child.stderr.on("data", (chunk) => this.logger.warn("lark_consumer_stderr", { output: String(chunk) }));
     return child;
   }
 

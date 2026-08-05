@@ -9,6 +9,9 @@
 - HTTP 测试入口，便于后续接入飞书 Base
 - `lark-cli event consume` 消息监听与机器人回复适配
 - PostgreSQL 生产存储，以及本地 JSON 开发后备
+- 管理端/消息入口独立 API Key、飞书租户/用户/群聊白名单
+- 消息幂等、跨实例会话锁、高风险管理操作二次确认
+- JSON 结构化日志与敏感字段脱敏
 
 ## Run
 
@@ -26,6 +29,7 @@ npm run dev
 ```bash
 curl -X POST http://127.0.0.1:8090/api/messages \
   -H 'content-type: application/json' \
+  -H "authorization: Bearer $INGRESS_API_KEY" \
   -d '{"chat_id":"oc_demo","sender_id":"ou_demo","message_id":"om_demo_1","content":"我想做一个 Meta 消耗看板","sender_type":"user"}'
 ```
 
@@ -38,11 +42,17 @@ Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-dep
 管理接口：
 
 ```bash
-curl 'http://127.0.0.1:8090/api/requirements?status=进行中'
-curl -X PATCH http://127.0.0.1:8090/api/requirements/REQ-xxx \
+curl 'http://127.0.0.1:8090/api/requirements?status=进行中' \
+  -H "authorization: Bearer $ADMIN_API_KEY"
+curl -X POST http://127.0.0.1:8090/api/admin/confirmations \
+  -H "authorization: Bearer $ADMIN_API_KEY" \
   -H 'content-type: application/json' \
-  -d '{"status":"进行中","ownerId":"ou_owner","progress":"正在核对数据"}'
+  -d '{"action":"PATCH_REQUIREMENT","resourceId":"REQ-xxx","body":{"status":"进行中"}}'
 ```
+
+签发结果中的 `token` 必须通过 `x-confirmation-token` 传给完全相同的 PATCH/DELETE 请求；令牌默认 5 分钟过期，并绑定操作人、需求 ID 和请求正文。管理查询必须携带 `ADMIN_API_KEY`，消息入口必须携带独立的 `INGRESS_API_KEY`。
+
+群聊默认只有明确 `@` 当前机器人时才处理。生产环境应至少配置 `BOT_OPEN_ID`，并按需设置 `ALLOWED_TENANT_KEYS`、`ALLOWED_USER_IDS`、`ALLOWED_CHAT_IDS`（逗号分隔）；空白名单表示不限制该维度。
 
 ## Conversation rules
 

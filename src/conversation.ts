@@ -8,8 +8,8 @@ export interface ConversationConfig {
 }
 
 export class ConversationService {
-  private readonly store: RequirementStore;
-  private readonly config: ConversationConfig;
+  readonly store: RequirementStore;
+  readonly config: ConversationConfig;
 
   constructor(store: RequirementStore, config: ConversationConfig) {
     this.store = store;

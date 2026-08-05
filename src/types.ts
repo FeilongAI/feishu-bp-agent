@@ -59,17 +59,34 @@ export interface ConversationState {
 
 export interface IncomingMessage {
   chatId: string;
+  chatType?: "p2p" | "group";
+  tenantKey?: string;
   senderId: string;
   senderName?: string;
   messageId: string;
   content: string;
   senderType?: "user" | "bot";
   threadId?: string;
+  mentions?: Array<{ id: string; name?: string }>;
 }
 
 export interface BotReply {
   text: string;
   replyInThread?: boolean;
+}
+
+export interface ProcessedMessageClaim {
+  claimed: boolean;
+  reply?: BotReply;
+  status?: "processing" | "completed" | "failed";
+}
+
+export interface AdminAuditEvent {
+  actorId: string;
+  action: string;
+  resourceId?: string;
+  payload?: unknown;
+  result: "success" | "denied" | "failed";
 }
 
 export interface RequirementStore {
@@ -79,6 +96,11 @@ export interface RequirementStore {
   listRequirements(filter?: { requesterId?: string; status?: RequirementStatus; visibility?: Requirement["visibility"] }): Promise<Requirement[]>;
   updateRequirement(id: string, patch: Partial<Pick<Requirement, "status" | "ownerId" | "ownerName" | "progress" | "desiredDate" | "priority" | "visibility">>): Promise<Requirement | undefined>;
   deleteRequirement(id: string): Promise<boolean>;
+  claimMessage(messageId: string, conversationKey: string): Promise<ProcessedMessageClaim>;
+  completeMessage(messageId: string, reply: BotReply): Promise<void>;
+  failMessage(messageId: string, errorCode: string): Promise<void>;
+  withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T>;
+  recordAudit(event: AdminAuditEvent): Promise<void>;
   healthCheck(): Promise<void>;
   close(): Promise<void>;
 }

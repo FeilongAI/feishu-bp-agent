@@ -1,10 +1,19 @@
 import pg from "pg";
-import type { ConversationState, Requirement, RequirementStatus, RequirementStore } from "./types.ts";
+import type { AdminAuditEvent, BotReply, ConversationState, ProcessedMessageClaim, Requirement, RequirementStatus, RequirementStore } from "./types.ts";
 
 const { Pool } = pg;
 
 interface Queryable {
   query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
+}
+
+interface PoolClientLike extends Queryable {
+  release(): void;
+}
+
+interface PoolLike extends Queryable {
+  connect(): Promise<PoolClientLike>;
+  end(): Promise<void>;
 }
 
 function toRequirement(row: Record<string, unknown>): Requirement {
@@ -32,14 +41,22 @@ function toRequirement(row: Record<string, unknown>): Requirement {
 }
 
 export class PostgresRequirementStore implements RequirementStore {
-  private readonly pool: InstanceType<typeof Pool>;
+  private readonly db: Queryable;
+  private readonly pool?: PoolLike;
 
-  constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: Number(process.env.PG_POOL_MAX || 10), idleTimeoutMillis: 30_000 });
+  constructor(connectionString: string, db?: Queryable, pool?: PoolLike) {
+    if (db) {
+      this.db = db;
+      this.pool = pool;
+      return;
+    }
+    const createdPool = new Pool({ connectionString, max: Number(process.env.PG_POOL_MAX || 10), idleTimeoutMillis: 30_000 }) as unknown as PoolLike;
+    this.db = createdPool;
+    this.pool = createdPool;
   }
 
   async getConversation(key: string): Promise<ConversationState | undefined> {
-    const result = await this.pool.query("SELECT * FROM bp_conversation WHERE conversation_key = $1", [key]);
+    const result = await this.db.query("SELECT * FROM bp_conversation WHERE conversation_key = $1", [key]);
     const row = result.rows[0];
     if (!row) return undefined;
     return {
@@ -55,7 +72,7 @@ export class PostgresRequirementStore implements RequirementStore {
   }
 
   async saveConversation(conversation: ConversationState): Promise<void> {
-    await this.pool.query(
+    await this.db.query(
       `INSERT INTO bp_conversation (conversation_key, chat_id, sender_id, sender_name, thread_id, draft, recent_messages, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)
        ON CONFLICT (conversation_key) DO UPDATE SET sender_name=EXCLUDED.sender_name, draft=EXCLUDED.draft,
@@ -65,7 +82,7 @@ export class PostgresRequirementStore implements RequirementStore {
   }
 
   async createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Promise<Requirement> {
-    const result = await this.pool.query(
+    const result = await this.db.query(
       `INSERT INTO bp_requirement (title, goal, scope, acceptance_criteria, requester_id, requester_name, platforms,
        desired_date, priority, status, owner_id, owner_name, progress, visibility, source_chat_id, source_message_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
@@ -81,7 +98,7 @@ export class PostgresRequirementStore implements RequirementStore {
     if (filter?.status) { values.push(filter.status); conditions.push(`status = $${values.length}`); }
     if (filter?.visibility) { values.push(filter.visibility); conditions.push(`visibility = $${values.length}`); }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const result = await this.pool.query(`SELECT * FROM bp_requirement ${where} ORDER BY updated_at DESC`, values);
+    const result = await this.db.query(`SELECT * FROM bp_requirement ${where} ORDER BY updated_at DESC`, values);
     return result.rows.map(toRequirement);
   }
 
@@ -96,15 +113,83 @@ export class PostgresRequirementStore implements RequirementStore {
     }
     if (!updates.length) return (await this.listRequirements()).find((item) => item.id === id);
     values.push(id);
-    const result = await this.pool.query(`UPDATE bp_requirement SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $${values.length} RETURNING *`, values);
+    const result = await this.db.query(`UPDATE bp_requirement SET ${updates.join(", ")}, updated_at = NOW() WHERE id = $${values.length} RETURNING *`, values);
     return result.rows[0] ? toRequirement(result.rows[0]) : undefined;
   }
 
   async deleteRequirement(id: string): Promise<boolean> {
-    const result = await this.pool.query("DELETE FROM bp_requirement WHERE id = $1", [id]);
+    const result = await this.db.query("DELETE FROM bp_requirement WHERE id = $1", [id]);
     return result.rowCount === 1;
   }
 
-  async healthCheck(): Promise<void> { await this.pool.query("SELECT 1"); }
-  async close(): Promise<void> { await this.pool.end(); }
+  async claimMessage(messageId: string, conversationKey: string): Promise<ProcessedMessageClaim> {
+    const inserted = await this.db.query(
+      `INSERT INTO bp_processed_message (message_id, conversation_key, status)
+       VALUES ($1, $2, 'processing') ON CONFLICT (message_id) DO NOTHING RETURNING status`,
+      [messageId, conversationKey],
+    );
+    if (inserted.rowCount === 1) return { claimed: true, status: "processing" };
+
+    const reclaimed = await this.db.query(
+      `UPDATE bp_processed_message SET status = 'processing', reply = NULL, error_code = NULL, updated_at = NOW()
+       WHERE message_id = $1 AND (status = 'failed' OR (status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes'))
+       RETURNING status`,
+      [messageId],
+    );
+    if (reclaimed.rowCount === 1) return { claimed: true, status: "processing" };
+
+    const existing = await this.db.query("SELECT status, reply FROM bp_processed_message WHERE message_id = $1", [messageId]);
+    const row = existing.rows[0];
+    if (!row) return { claimed: false, status: "failed" };
+    return {
+      claimed: false,
+      status: String(row.status) as ProcessedMessageClaim["status"],
+      reply: row.reply ? row.reply as unknown as BotReply : undefined,
+    };
+  }
+
+  async completeMessage(messageId: string, reply: BotReply): Promise<void> {
+    await this.db.query(
+      "UPDATE bp_processed_message SET status = 'completed', reply = $2::jsonb, error_code = NULL, updated_at = NOW() WHERE message_id = $1",
+      [messageId, JSON.stringify(reply)],
+    );
+  }
+
+  async failMessage(messageId: string, errorCode: string): Promise<void> {
+    await this.db.query(
+      `INSERT INTO bp_processed_message (message_id, conversation_key, status, error_code)
+       VALUES ($1, 'unknown', 'failed', $2)
+       ON CONFLICT (message_id) DO UPDATE SET status = 'failed', error_code = EXCLUDED.error_code, updated_at = NOW()`,
+      [messageId, errorCode],
+    );
+  }
+
+  async withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T> {
+    if (!this.pool) return operation(this);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [conversationKey]);
+      const transactionalStore = new PostgresRequirementStore("", client);
+      const result = await operation(transactionalStore);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordAudit(event: AdminAuditEvent): Promise<void> {
+    await this.db.query(
+      `INSERT INTO bp_admin_audit (actor_id, action, resource_id, payload, result)
+       VALUES ($1, $2, $3, $4::jsonb, $5)`,
+      [event.actorId, event.action, event.resourceId ?? null, JSON.stringify(event.payload ?? null), event.result],
+    );
+  }
+
+  async healthCheck(): Promise<void> { await this.db.query("SELECT 1"); }
+  async close(): Promise<void> { if (this.pool) await this.pool.end(); }
 }

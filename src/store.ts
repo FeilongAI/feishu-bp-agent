@@ -13,17 +13,17 @@ export class InMemoryRequirementStore implements RequirementStore {
     this.load();
   }
 
-  getConversation(key: string): ConversationState | undefined {
+  async getConversation(key: string): Promise<ConversationState | undefined> {
     const value = this.conversations.get(key);
     return value ? structuredClone(value) : undefined;
   }
 
-  saveConversation(conversation: ConversationState): void {
+  async saveConversation(conversation: ConversationState): Promise<void> {
     this.conversations.set(conversation.key, structuredClone(conversation));
     this.persist();
   }
 
-  createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Requirement {
+  async createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Promise<Requirement> {
     const now = new Date().toISOString();
     const requirement: Requirement = { ...input, id: `REQ-${now.slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 6).toUpperCase()}`, createdAt: now, updatedAt: now };
     this.requirements.set(requirement.id, requirement);
@@ -31,7 +31,7 @@ export class InMemoryRequirementStore implements RequirementStore {
     return structuredClone(requirement);
   }
 
-  listRequirements(filter: Parameters<RequirementStore["listRequirements"]>[0] = {}): Requirement[] {
+  async listRequirements(filter: Parameters<RequirementStore["listRequirements"]>[0] = {}): Promise<Requirement[]> {
     return [...this.requirements.values()]
       .filter((item) => !filter?.requesterId || item.requesterId === filter.requesterId)
       .filter((item) => !filter?.status || item.status === filter.status)
@@ -40,7 +40,7 @@ export class InMemoryRequirementStore implements RequirementStore {
       .map((item) => structuredClone(item));
   }
 
-  updateRequirement(id: string, patch: Partial<Pick<Requirement, "status" | "ownerId" | "ownerName" | "progress" | "desiredDate" | "priority" | "visibility">>): Requirement | undefined {
+  async updateRequirement(id: string, patch: Partial<Pick<Requirement, "status" | "ownerId" | "ownerName" | "progress" | "desiredDate" | "priority" | "visibility">>): Promise<Requirement | undefined> {
     const current = this.requirements.get(id);
     if (!current) return undefined;
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
@@ -48,6 +48,16 @@ export class InMemoryRequirementStore implements RequirementStore {
     this.persist();
     return structuredClone(updated);
   }
+
+  async deleteRequirement(id: string): Promise<boolean> {
+    const deleted = this.requirements.delete(id);
+    if (deleted) this.persist();
+    return deleted;
+  }
+
+  async healthCheck(): Promise<void> {}
+
+  async close(): Promise<void> {}
 
   private load(): void {
     if (!this.filePath || !existsSync(this.filePath)) return;

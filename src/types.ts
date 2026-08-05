@@ -73,9 +73,12 @@ export interface BotReply {
 }
 
 export interface RequirementStore {
-  getConversation(key: string): ConversationState | undefined;
-  saveConversation(conversation: ConversationState): void;
-  createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Requirement;
-  listRequirements(filter?: { requesterId?: string; status?: RequirementStatus; visibility?: Requirement["visibility"] }): Requirement[];
-  updateRequirement(id: string, patch: Partial<Pick<Requirement, "status" | "ownerId" | "ownerName" | "progress" | "desiredDate" | "priority" | "visibility">>): Requirement | undefined;
+  getConversation(key: string): Promise<ConversationState | undefined>;
+  saveConversation(conversation: ConversationState): Promise<void>;
+  createRequirement(input: Omit<Requirement, "id" | "createdAt" | "updatedAt">): Promise<Requirement>;
+  listRequirements(filter?: { requesterId?: string; status?: RequirementStatus; visibility?: Requirement["visibility"] }): Promise<Requirement[]>;
+  updateRequirement(id: string, patch: Partial<Pick<Requirement, "status" | "ownerId" | "ownerName" | "progress" | "desiredDate" | "priority" | "visibility">>): Promise<Requirement | undefined>;
+  deleteRequirement(id: string): Promise<boolean>;
+  healthCheck(): Promise<void>;
+  close(): Promise<void>;
 }

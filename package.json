@@ -10,6 +10,10 @@
   "scripts": {
     "dev": "node --experimental-strip-types src/index.ts",
     "start": "node --experimental-strip-types src/index.ts",
+    "migrate": "node --experimental-strip-types src/migrate.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
   }
 }

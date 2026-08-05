@@ -1,0 +1,15 @@
+{
+  "name": "feishu-bp-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Feishu conversational BP requirement intake and workload assistant",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "dev": "node --experimental-strip-types src/index.ts",
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  }
+}

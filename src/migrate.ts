@@ -8,6 +8,7 @@ if (!connectionString) throw new Error("DATABASE_URL is required");
 const client = new Client({ connectionString });
 await client.connect();
 try {
+  await client.query("SELECT pg_advisory_lock(hashtext('feishu-bp-agent:migrations'))");
   await client.query("CREATE TABLE IF NOT EXISTS bp_schema_migration (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
   const files = (await readdir(new URL("../migrations/", import.meta.url))).filter((name) => name.endsWith(".sql")).sort();
   for (const name of files) {
@@ -26,5 +27,6 @@ try {
     }
   }
 } finally {
+  await client.query("SELECT pg_advisory_unlock(hashtext('feishu-bp-agent:migrations'))").catch(() => undefined);
   await client.end();
 }

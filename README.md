@@ -20,6 +20,10 @@ Node.js 22.6+ is required for native TypeScript stripping.
 
 ```bash
 cp .env.example .env
+vi .env
+set -a
+. ./.env
+set +a
 npm run migrate
 npm test
 npm run dev
@@ -38,7 +42,7 @@ curl -X POST http://127.0.0.1:8090/api/messages \
 
 配置 `DATABASE_URL` 后服务自动使用 PostgreSQL；不配置时才使用 `DATA_FILE`。首次启动 PostgreSQL 环境前必须运行 `npm run migrate`。
 
-Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。
+Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)，PM2/systemd 参见 [docs/process-manager-deploy.md](docs/process-manager-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。
 
 飞书 Base 同步使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。
 

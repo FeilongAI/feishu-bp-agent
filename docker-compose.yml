@@ -1,4 +1,18 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: feishu_bp_agent
+      POSTGRES_USER: feishu_bp_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - feishu-bp-agent-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feishu_bp_agent -d feishu_bp_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
   feishu-bp-agent:
     build:
       context: .
@@ -12,11 +26,14 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 8090
-      DATA_FILE: /data/state.json
+      DATABASE_URL: postgresql://feishu_bp_agent:${POSTGRES_PASSWORD}@postgres:5432/feishu_bp_agent
+      REQUIRE_DATABASE_URL: "true"
+      RUN_MIGRATIONS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "8090:8090"
-    volumes:
-      - feishu-bp-agent-data:/data
+      - "127.0.0.1:8090:8090"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -26,4 +43,4 @@ services:
       - /tmp
 
 volumes:
-  feishu-bp-agent-data:
+  feishu-bp-agent-postgres:

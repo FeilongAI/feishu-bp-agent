@@ -17,6 +17,20 @@ const auth = {
 };
 validateAuthConfig(auth);
 
+if (process.env.NODE_ENV === "production") {
+  const productionSecrets = {
+    ADMIN_API_KEY: auth.adminApiKey,
+    INGRESS_API_KEY: auth.ingressApiKey,
+    CONFIRMATION_SECRET: process.env.CONFIRMATION_SECRET || "",
+    DATABASE_URL: process.env.DATABASE_URL || "",
+    ...(process.env.BASE_SYNC_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
+  };
+  const invalid = Object.entries(productionSecrets)
+    .filter(([, value]) => !value || /change_me|replace_with/i.test(value))
+    .map(([name]) => name);
+  if (invalid.length) throw new Error(`Production secrets are missing or still placeholders: ${invalid.join(", ")}`);
+}
+
 const store = process.env.DATABASE_URL
   ? new PostgresRequirementStore(process.env.DATABASE_URL)
   : new InMemoryRequirementStore(process.env.DATA_FILE || "data/state.json");

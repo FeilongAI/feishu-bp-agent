@@ -1,0 +1,36 @@
+[Unit]
+Description=Feishu BP requirement agent
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=feishu-bp-agent
+Group=feishu-bp-agent
+WorkingDirectory=/opt/feishu-bp-agent
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/feishu-bp-agent.env
+StateDirectory=feishu-bp-agent
+StateDirectoryMode=0750
+UMask=0027
+ExecStartPre=/usr/bin/node --experimental-strip-types /opt/feishu-bp-agent/src/migrate.ts
+ExecStart=/usr/bin/node --experimental-strip-types /opt/feishu-bp-agent/src/index.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/feishu-bp-agent
+
+[Install]
+WantedBy=multi-user.target

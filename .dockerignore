@@ -8,3 +8,4 @@ data
 logs
 test
 *.log
+npm-debug.log*

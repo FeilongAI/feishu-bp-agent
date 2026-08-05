@@ -1,0 +1,29 @@
+services:
+  feishu-bp-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: feishu-bp-agent:local
+    container_name: feishu-bp-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8090
+      DATA_FILE: /data/state.json
+    ports:
+      - "8090:8090"
+    volumes:
+      - feishu-bp-agent-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  feishu-bp-agent-data:

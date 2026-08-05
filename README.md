@@ -30,6 +30,8 @@ curl -X POST http://127.0.0.1:8090/api/messages \
 
 真实飞书监听需要先完成应用事件订阅和 Bot 权限，然后设置 `RUN_LARK_CONSUMER=true`。生产环境建议替换 JSON 存储，并把写入 Base/任务系统放到受控的工具适配器中。
 
+Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。
+
 管理接口：
 
 ```bash

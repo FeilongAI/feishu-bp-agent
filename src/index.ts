@@ -7,8 +7,9 @@ const store = new InMemoryRequirementStore(process.env.DATA_FILE || "data/state.
 const service = new ConversationService(store, { ownerId: process.env.OWNER_OPEN_ID || "", ownerName: process.env.OWNER_NAME || "负责人" });
 const server = createHttpServer(service, store);
 const port = Number(process.env.PORT || 8090);
+const host = process.env.HOST || "127.0.0.1";
 
-server.listen(port, "127.0.0.1", () => process.stdout.write(`feishu-bp-agent listening on http://127.0.0.1:${port}\n`));
+server.listen(port, host, () => process.stdout.write(`feishu-bp-agent listening on http://${host}:${port}\n`));
 
 if (process.env.RUN_LARK_CONSUMER === "true") {
   const lark = new LarkCliClient();

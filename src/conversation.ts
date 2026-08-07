@@ -1,4 +1,5 @@
 import type { BotReply, ConversationState, IncomingMessage, RequirementDraft, RequirementStore } from "./types.ts";
+import type { ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 
 const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdMob", "Pangle", "Mintegral"];
 
@@ -10,10 +11,12 @@ export interface ConversationConfig {
 export class ConversationService {
   readonly store: RequirementStore;
   readonly config: ConversationConfig;
+  readonly understanding?: UnderstandingClient;
 
-  constructor(store: RequirementStore, config: ConversationConfig) {
+  constructor(store: RequirementStore, config: ConversationConfig, understanding?: UnderstandingClient) {
     this.store = store;
     this.config = config;
+    this.understanding = understanding;
   }
 
   async handleMessage(message: IncomingMessage): Promise<BotReply> {
@@ -21,31 +24,46 @@ export class ConversationService {
 
     const key = `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
     const conversation = await this.store.getConversation(key) ?? this.newConversation(message, key);
+    const text = message.content.trim();
+    const ruleCurrentWork = this.isCurrentWorkQuery(text);
+    const ruleMyRequirements = this.isMyRequirementsQuery(text);
+    const ruleCancel = /^(取消|放弃|清空)(当前)?需求/.test(text);
+    const ruleConfirmation = /^(确认|确认提交|提交|是的|可以提交)$/.test(text);
+    const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation
+      ? undefined
+      : await this.analyze({
+        message: text,
+        recentMessages: conversation.recentMessages,
+        draft: conversation.draft,
+      });
     conversation.recentMessages = [...conversation.recentMessages, message.content].slice(-8);
     conversation.updatedAt = new Date().toISOString();
 
-    const text = message.content.trim();
-    if (this.isCurrentWorkQuery(text)) {
+    if (analysis?.intent === "current_work_query" || ruleCurrentWork) {
       await this.store.saveConversation(conversation);
       return { text: await this.currentWorkReply() };
     }
-    if (this.isMyRequirementsQuery(text)) {
+    if (analysis?.intent === "my_requirements_query" || ruleMyRequirements) {
       await this.store.saveConversation(conversation);
       return { text: await this.myRequirementsReply(message.senderId) };
     }
-    if (/^(取消|放弃|清空)(当前)?需求/.test(text)) {
+    if (analysis?.intent === "cancel_requirement" || ruleCancel) {
       delete conversation.draft;
       await this.store.saveConversation(conversation);
       return { text: "已清空当前需求草稿。需要提交新需求时，直接告诉我想解决什么问题即可。" };
     }
-    if (/^(新需求|提需求|需求)[:：]?/.test(text) && conversation.draft) {
+    const startsRequirement = analysis?.intent === "new_requirement" || /^(新需求|提需求|需求)[:：]?/.test(text);
+    if (startsRequirement && conversation.draft) {
       delete conversation.draft;
     }
 
-    if (!conversation.draft) conversation.draft = this.createDraft(message, key, text);
-    else this.fillDraft(conversation.draft, text);
+    const confirmsRequirement = analysis?.intent === "confirm_requirement" || ruleConfirmation;
+    if (confirmsRequirement && !conversation.draft) {
+      await this.store.saveConversation(conversation);
+      return { text: "目前没有等待确认的需求草稿。请先告诉我你想解决的问题，我会逐步帮你整理。" };
+    }
 
-    if (/^(确认|确认提交|提交|是的|可以提交)$/.test(text) && conversation.draft.state === "awaiting_confirmation") {
+    if (confirmsRequirement && conversation.draft?.state === "awaiting_confirmation") {
       const requirement = await this.store.createRequirement({
         title: conversation.draft.title,
         goal: conversation.draft.goal!,
@@ -66,7 +84,16 @@ export class ConversationService {
       return { text: `已记录需求 ${requirement.id}，当前状态为“待评估”。\n\n我会在确认优先级和排期后，再同步预计完成时间。` };
     }
 
-    const reply = this.nextDraftReply(conversation.draft);
+    if (analysis?.intent === "general_conversation" && !conversation.draft) {
+      await this.store.saveConversation(conversation);
+      return { text: "我可以帮你记录和澄清需求，也可以查询“我的需求”或询问“当前正在做什么”。直接描述你希望解决的问题即可。" };
+    }
+
+    if (!conversation.draft) conversation.draft = this.createDraft(message, key, text);
+    else this.fillDraft(conversation.draft, text);
+    if (analysis) this.mergeFields(conversation.draft, analysis.fields);
+
+    const reply = this.nextDraftReply(conversation.draft, analysis);
     await this.store.saveConversation(conversation);
     return { text: reply };
   }
@@ -96,12 +123,32 @@ export class ConversationService {
     draft.updatedAt = new Date().toISOString();
   }
 
-  private nextDraftReply(draft: RequirementDraft): string {
-    if (!draft.goal) return "为了把需求记录准确，先告诉我：这个需求主要想解决什么问题，或希望达成什么结果？";
-    if (!draft.scope) return "还需要明确范围：涉及哪些平台、游戏、数据指标或看板模块？";
-    if (!draft.acceptanceCriteria) return "最后确认验收标准：做到什么程度，你会认为这个需求已经完成？";
+  private mergeFields(draft: RequirementDraft, fields: ExtractedRequirementFields): void {
+    if (fields.title) draft.title = fields.title;
+    if (fields.goal) draft.goal = fields.goal;
+    if (fields.scope) draft.scope = fields.scope;
+    if (fields.platforms?.length) draft.platforms = [...new Set(fields.platforms)];
+    if (fields.acceptanceCriteria) draft.acceptanceCriteria = fields.acceptanceCriteria;
+    if (fields.desiredDate) draft.desiredDate = fields.desiredDate;
+    if (fields.priority) draft.priority = fields.priority;
+    draft.updatedAt = new Date().toISOString();
+  }
+
+  private nextDraftReply(draft: RequirementDraft, analysis?: MessageUnderstanding): string {
+    if (!draft.goal) return analysis?.nextQuestion || "为了把需求记录准确，先告诉我：这个需求主要想解决什么问题，或希望达成什么结果？";
+    if (!draft.scope) return analysis?.nextQuestion || "还需要明确范围：涉及哪些平台、游戏、数据指标或看板模块？";
+    if (!draft.acceptanceCriteria) return analysis?.nextQuestion || "最后确认验收标准：做到什么程度，你会认为这个需求已经完成？";
     draft.state = "awaiting_confirmation";
     return this.formatDraft(draft) + "\n\n信息确认无误后，请回复“确认提交”；还可以继续补充期望时间或优先级。";
+  }
+
+  private async analyze(input: Parameters<UnderstandingClient["analyze"]>[0]): Promise<MessageUnderstanding | undefined> {
+    if (!this.understanding) return undefined;
+    try {
+      return await this.understanding.analyze(input);
+    } catch {
+      return undefined;
+    }
   }
 
   private formatDraft(draft: RequirementDraft): string {

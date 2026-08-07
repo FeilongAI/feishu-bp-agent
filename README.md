@@ -5,6 +5,7 @@
 当前版本包含：
 
 - 多轮需求澄清：需求草稿 -> 补充信息 -> 用户确认 -> 正式需求
+- 可选的 OpenAI-compatible 语义理解，异常或关闭时自动使用规则引擎
 - “我的需求”和“当前工作”查询
 - HTTP 测试入口，便于后续接入飞书 Base
 - `lark-cli event consume` 消息监听与机器人回复适配
@@ -46,6 +47,8 @@ Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-dep
 
 飞书 Base 同步使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。
 
+启用语义理解时设置 `LLM_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。服务调用兼容的 `/chat/completions` 接口，只接受经过校验的意图和需求字段；模型无法直接写数据库或操作飞书。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
+
 管理接口：
 
 ```bash
@@ -63,4 +66,4 @@ curl -X POST http://127.0.0.1:8090/api/admin/confirmations \
 
 ## Conversation rules
 
-The agent never creates a formal requirement from an unconfirmed draft. It asks for the business goal, scope, and acceptance criteria, then waits for an explicit confirmation.
+The agent never creates a formal requirement from an unconfirmed draft. It asks for the business goal, scope, and acceptance criteria, then waits for an explicit confirmation. LLM output is advisory structured data only; confirmation and persistence remain deterministic application logic.

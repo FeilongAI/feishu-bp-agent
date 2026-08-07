@@ -22,6 +22,20 @@ BOT_OPEN_ID=ou_your_bot_open_id
 
 Use URL-safe alphanumeric database passwords in Compose, or percent-encode reserved URI characters in `DATABASE_URL`. Production startup rejects missing values and example placeholders.
 
+To enable semantic requirement understanding, add an OpenAI-compatible provider:
+
+```dotenv
+LLM_ENABLED=true
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_API_KEY=your_server_side_api_key
+LLM_MODEL=your_model_name
+LLM_TIMEOUT_MS=8000
+LLM_MAX_RETRIES=1
+LLM_MAX_INPUT_CHARS=6000
+```
+
+The provider must implement `POST /chat/completions` and JSON object response mode. Keep `LLM_API_KEY` only in the server environment. Requirement messages and a bounded amount of recent conversation context are sent to this provider, so choose the provider and data-retention policy according to your privacy requirements. If the provider times out, returns an error, or returns malformed data, the service continues with the built-in deterministic rules.
+
 ## 2. Build and run against an existing PostgreSQL
 
 ```bash

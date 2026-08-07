@@ -10,6 +10,7 @@ import { MessageProcessor } from "./messageProcessor.ts";
 import { csvSet } from "./permissions.ts";
 import { PostgresRequirementStore } from "./postgres.ts";
 import { InMemoryRequirementStore } from "./store.ts";
+import { OpenAICompatibleUnderstandingClient } from "./understanding.ts";
 
 const auth = {
   adminApiKey: process.env.ADMIN_API_KEY || "",
@@ -24,6 +25,7 @@ if (process.env.NODE_ENV === "production") {
     CONFIRMATION_SECRET: process.env.CONFIRMATION_SECRET || "",
     DATABASE_URL: process.env.DATABASE_URL || "",
     ...(process.env.BASE_SYNC_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
+    ...(process.env.LLM_ENABLED === "true" ? { LLM_API_KEY: process.env.LLM_API_KEY || "" } : {}),
   };
   const invalid = Object.entries(productionSecrets)
     .filter(([, value]) => !value || /change_me|replace_with/i.test(value))
@@ -34,7 +36,17 @@ if (process.env.NODE_ENV === "production") {
 const store = process.env.DATABASE_URL
   ? new PostgresRequirementStore(process.env.DATABASE_URL)
   : new InMemoryRequirementStore(process.env.DATA_FILE || "data/state.json");
-const service = new ConversationService(store, { ownerId: process.env.OWNER_OPEN_ID || "", ownerName: process.env.OWNER_NAME || "负责人" });
+const understanding = process.env.LLM_ENABLED === "true"
+  ? new OpenAICompatibleUnderstandingClient({
+    baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
+    apiKey: process.env.LLM_API_KEY || "",
+    model: process.env.LLM_MODEL || "",
+    timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 8_000),
+    maxRetries: Number(process.env.LLM_MAX_RETRIES || 1),
+    maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
+  }, logger)
+  : undefined;
+const service = new ConversationService(store, { ownerId: process.env.OWNER_OPEN_ID || "", ownerName: process.env.OWNER_NAME || "负责人" }, understanding);
 const processor = new MessageProcessor(store, service, {
   allowedTenantKeys: csvSet(process.env.ALLOWED_TENANT_KEYS),
   allowedUserIds: csvSet(process.env.ALLOWED_USER_IDS),

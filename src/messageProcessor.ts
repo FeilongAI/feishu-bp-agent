@@ -41,7 +41,7 @@ export class MessageProcessor {
           if (claim.status === "completed" && claim.reply) return claim.reply;
           throw new Error(`message_unavailable:${claim.status ?? "unknown"}`);
         }
-        const lockedService = new ConversationService(lockedStore, this.service.config);
+        const lockedService = new ConversationService(lockedStore, this.service.config, this.service.understanding);
         const reply = await lockedService.handleMessage(message);
         await lockedStore.completeMessage(message.messageId, reply);
         return reply;

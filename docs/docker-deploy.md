@@ -79,10 +79,10 @@ curl http://127.0.0.1:8090/api/requirements \
 
 Only `/healthz` is public. Place the service behind TLS and restrict `/api/messages` to the trusted event forwarder even though it also requires `INGRESS_API_KEY`.
 
-## Lark event modes
+## Lark message gateway
 
-The image intentionally does not bundle `lark-cli` or a personal Keychain session. The core container accepts normalized events at `POST /api/messages`.
+Compose builds a separate `feishu-bp-forwarder` image containing the pinned official `lark-cli`. The core image intentionally remains free of personal CLI/Keychain state and accepts normalized events at `POST /api/messages`.
 
-For the current CLI event mode, run `lark-cli event consume` in a controlled host process or sidecar and forward normalized events with `INGRESS_API_KEY`. If `RUN_LARK_CONSUMER=true` is set on the core image without installing `LARK_CLI_BIN`, the entrypoint fails immediately.
+The forwarder initializes its Bot application profile from secret stdin, maintains the long-running event consumer, persists messages before delivery, retries failures, and sends idempotent replies. Keep `RUN_LARK_CONSUMER=false` on the core service to avoid duplicate consumers. Full setup and verification are documented in [lark-message-gateway.md](lark-message-gateway.md).
 
 Feishu Base sync is different: it runs inside the service through application credentials and direct OpenAPI. See [feishu-base-sync.md](feishu-base-sync.md).

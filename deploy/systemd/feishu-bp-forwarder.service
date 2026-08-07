@@ -1,0 +1,39 @@
+[Unit]
+Description=Feishu BP lark-cli message forwarder
+After=network-online.target feishu-bp-agent.service
+Wants=network-online.target feishu-bp-agent.service
+
+[Service]
+Type=simple
+User=feishu-bp-agent
+Group=feishu-bp-agent
+WorkingDirectory=/opt/feishu-bp-agent
+EnvironmentFile=/etc/feishu-bp-agent.env
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/feishu-bp-forwarder
+Environment=FORWARDER_CORE_URL=http://127.0.0.1:8090
+Environment=FORWARDER_SPOOL_DIR=/var/lib/feishu-bp-forwarder/spool
+StateDirectory=feishu-bp-forwarder
+StateDirectoryMode=0700
+UMask=0077
+ExecStartPre=/bin/sh -c 'printf "%%s\n" "$FEISHU_APP_SECRET" | /usr/local/bin/lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand "${FEISHU_BRAND:-feishu}"'
+ExecStart=/usr/bin/node --experimental-strip-types /opt/feishu-bp-agent/src/forwarderMain.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/feishu-bp-forwarder
+
+[Install]
+WantedBy=multi-user.target

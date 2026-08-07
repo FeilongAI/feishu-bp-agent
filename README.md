@@ -9,6 +9,7 @@
 - “我的需求”和“当前工作”查询
 - HTTP 测试入口，便于后续接入飞书 Base
 - `lark-cli event consume` 消息监听与机器人回复适配
+- 独立 `lark-cli` 消息网关：持久化事件、失败重试、崩溃重放、幂等回复和健康检查
 - PostgreSQL 生产存储，以及本地 JSON 开发后备
 - 管理端/消息入口独立 API Key、飞书租户/用户/群聊白名单
 - 消息幂等、跨实例会话锁、高风险管理操作二次确认
@@ -39,11 +40,11 @@ curl -X POST http://127.0.0.1:8090/api/messages \
   -d '{"chat_id":"oc_demo","sender_id":"ou_demo","message_id":"om_demo_1","content":"我想做一个 Meta 消耗看板","sender_type":"user"}'
 ```
 
-真实飞书监听需要先完成应用事件订阅和 Bot 权限，然后设置 `RUN_LARK_CONSUMER=true`。生产环境必须配置 PostgreSQL，并把 Base/任务系统写入放到受控的工具适配器中。
+真实飞书监听由 `feishu-bp-forwarder` 容器负责，核心容器保持 `RUN_LARK_CONSUMER=false`。执行 `docker compose up -d --build` 会启动 PostgreSQL、核心服务和消息网关；网关通过 CLI 长连接收消息，调用核心 `/api/messages`，再以 Bot 身份回复。完整权限、验证和排障步骤参见 [docs/lark-message-gateway.md](docs/lark-message-gateway.md)。
 
 配置 `DATABASE_URL` 后服务自动使用 PostgreSQL；不配置时才使用 `DATA_FILE`。首次启动 PostgreSQL 环境前必须运行 `npm run migrate`。
 
-Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)，PM2/systemd 参见 [docs/process-manager-deploy.md](docs/process-manager-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。
+Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)，PM2/systemd 参见 [docs/process-manager-deploy.md](docs/process-manager-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。消息网关只允许单实例运行，核心 HTTP 服务仍可水平扩容。
 
 飞书 Base 同步使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。
 

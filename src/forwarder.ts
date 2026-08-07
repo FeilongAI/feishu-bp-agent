@@ -1,0 +1,250 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import type { Logger } from "./logger.ts";
+import { normalizeLarkEvent } from "./lark.ts";
+import type { BotReply, IncomingMessage } from "./types.ts";
+
+export interface CoreAgentConfig {
+  url: string;
+  ingressApiKey: string;
+  timeoutMs: number;
+}
+
+export interface DeliveryConfig {
+  maxRetries: number;
+  retryBaseMs: number;
+}
+
+export interface CoreAgent {
+  process(message: IncomingMessage): Promise<BotReply>;
+}
+
+export interface ReplySender {
+  reply(messageId: string, reply: BotReply): Promise<void>;
+}
+
+export interface SpoolStore {
+  save(message: IncomingMessage): Promise<void>;
+  remove(messageId: string): Promise<void>;
+  list(): Promise<IncomingMessage[]>;
+  count(): Promise<number>;
+}
+
+export type CommandRunner = (command: string, args: string[]) => Promise<{ code: number | null; stderr: string }>;
+
+class CoreAgentError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable: boolean) {
+    super(message);
+    this.retryable = retryable;
+  }
+}
+
+function bounded(value: number, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.trunc(value)));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function spoolName(messageId: string): string {
+  return `${createHash("sha256").update(messageId).digest("hex")}.json`;
+}
+
+function isIncomingMessage(value: unknown): value is IncomingMessage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.chatId === "string"
+    && typeof item.senderId === "string"
+    && typeof item.messageId === "string"
+    && typeof item.content === "string";
+}
+
+export class CoreAgentHttpClient implements CoreAgent {
+  private readonly config: CoreAgentConfig;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(config: CoreAgentConfig, fetchImpl: typeof fetch = fetch) {
+    if (!config.url.trim()) throw new Error("FORWARDER_CORE_URL is required");
+    if (!config.ingressApiKey.trim()) throw new Error("INGRESS_API_KEY is required for the forwarder");
+    this.config = {
+      url: config.url.replace(/\/+$/, ""),
+      ingressApiKey: config.ingressApiKey,
+      timeoutMs: bounded(config.timeoutMs, 10_000, 500, 60_000),
+    };
+    this.fetchImpl = fetchImpl;
+  }
+
+  async process(message: IncomingMessage): Promise<BotReply> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    try {
+      const response = await this.fetchImpl(`${this.config.url}/api/messages`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.config.ingressApiKey}`,
+          "content-type": "application/json",
+          "x-request-id": `lark-${message.messageId}`.slice(0, 120),
+        },
+        body: JSON.stringify(message),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new CoreAgentError(`core_agent_http_${response.status}`, response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500);
+      const body = await response.json() as { ok?: unknown; reply?: { text?: unknown; replyInThread?: unknown } };
+      if (body.ok !== true || !body.reply || typeof body.reply.text !== "string") throw new CoreAgentError("core_agent_invalid_response", true);
+      return { text: body.reply.text, replyInThread: body.reply.replyInThread === true };
+    } catch (error) {
+      if (error instanceof CoreAgentError) throw error;
+      throw new CoreAgentError(error instanceof Error ? `core_agent_${error.name}` : "core_agent_unknown_error", true);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+export const runCommand: CommandRunner = (command, args) => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4_000); });
+  child.on("error", reject);
+  child.on("close", (code) => resolve({ code, stderr }));
+});
+
+export class LarkCliReplySender implements ReplySender {
+  private readonly bin: string;
+  private readonly runner: CommandRunner;
+
+  constructor(bin = "lark-cli", runner: CommandRunner = runCommand) {
+    this.bin = bin;
+    this.runner = runner;
+  }
+
+  async reply(messageId: string, reply: BotReply): Promise<void> {
+    if (!reply.text) return;
+    const key = `bp-${createHash("sha256").update(messageId).digest("hex").slice(0, 40)}`;
+    const args = ["im", "+messages-reply", "--message-id", messageId, "--text", reply.text, "--as", "bot", "--idempotency-key", key];
+    if (reply.replyInThread) args.push("--reply-in-thread");
+    const result = await this.runner(this.bin, args);
+    if (result.code !== 0) {
+      let reason = "unknown";
+      try {
+        const parsed = JSON.parse(result.stderr) as { error?: { subtype?: unknown; type?: unknown } };
+        reason = String(parsed.error?.subtype ?? parsed.error?.type ?? reason).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80) || "unknown";
+      } catch { /* keep a non-sensitive generic reason */ }
+      throw new Error(`lark_reply_failed:${reason}:exit_${result.code}`);
+    }
+  }
+}
+
+export class FileSpoolStore implements SpoolStore {
+  private readonly directory: string;
+
+  constructor(directory: string) {
+    if (!directory.trim()) throw new Error("FORWARDER_SPOOL_DIR is required");
+    this.directory = directory;
+  }
+
+  async save(message: IncomingMessage): Promise<void> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const destination = join(this.directory, spoolName(message.messageId));
+    const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(message), { encoding: "utf8", mode: 0o600 });
+    try {
+      await rename(temporary, destination);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+  }
+
+  async remove(messageId: string): Promise<void> {
+    await rm(join(this.directory, spoolName(messageId)), { force: true });
+  }
+
+  async list(): Promise<IncomingMessage[]> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const names = (await readdir(this.directory)).filter((name) => name.endsWith(".json")).sort();
+    const messages: IncomingMessage[] = [];
+    for (const name of names) {
+      try {
+        const value = JSON.parse(await readFile(join(this.directory, name), "utf8"));
+        if (!isIncomingMessage(value)) throw new Error("invalid_spool_item");
+        messages.push(value);
+      } catch {
+        await rename(join(this.directory, name), join(this.directory, `${name}.invalid-${Date.now()}`)).catch(() => undefined);
+      }
+    }
+    return messages;
+  }
+
+  async count(): Promise<number> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    return (await readdir(this.directory)).filter((name) => name.endsWith(".json")).length;
+  }
+}
+
+export class EventDeliveryService {
+  private readonly spool: SpoolStore;
+  private readonly core: CoreAgent;
+  private readonly replies: ReplySender;
+  private readonly logger: Logger;
+  private readonly config: DeliveryConfig;
+  private readonly active = new Set<string>();
+
+  constructor(spool: SpoolStore, core: CoreAgent, replies: ReplySender, logger: Logger, config: DeliveryConfig) {
+    this.spool = spool;
+    this.core = core;
+    this.replies = replies;
+    this.logger = logger;
+    this.config = {
+      maxRetries: bounded(config.maxRetries, 5, 0, 10),
+      retryBaseMs: bounded(config.retryBaseMs, 500, 10, 30_000),
+    };
+  }
+
+  async accept(rawEvent: Record<string, unknown>): Promise<boolean> {
+    const message = normalizeLarkEvent(rawEvent);
+    if (!message) return true;
+    await this.spool.save(message);
+    return this.deliver(message);
+  }
+
+  async replay(): Promise<void> {
+    for (const message of await this.spool.list()) await this.deliver(message);
+  }
+
+  async pendingCount(): Promise<number> {
+    return this.spool.count();
+  }
+
+  private async deliver(message: IncomingMessage): Promise<boolean> {
+    if (this.active.has(message.messageId)) return false;
+    this.active.add(message.messageId);
+    try {
+      for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
+        try {
+          const reply = await this.core.process(message);
+          await this.replies.reply(message.messageId, reply);
+          await this.spool.remove(message.messageId);
+          this.logger.info("lark_event_delivered", { messageId: message.messageId, chatId: message.chatId });
+          return true;
+        } catch (error) {
+          const retryable = !(error instanceof CoreAgentError) || error.retryable;
+          if (!retryable || attempt === this.config.maxRetries) {
+            this.logger.error("lark_event_delivery_failed", { messageId: message.messageId, attempt: attempt + 1, retryable, error });
+            return false;
+          }
+          await delay(Math.min(this.config.retryBaseMs * (2 ** attempt), 30_000));
+        }
+      }
+      return false;
+    } finally {
+      this.active.delete(message.messageId);
+    }
+  }
+}

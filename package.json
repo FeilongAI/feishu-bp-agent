@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "node --experimental-strip-types src/index.ts",
     "start": "node --experimental-strip-types src/index.ts",
+    "start:forwarder": "node --experimental-strip-types src/forwarderMain.ts",
     "migrate": "node --experimental-strip-types src/migrate.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },

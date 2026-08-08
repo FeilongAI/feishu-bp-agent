@@ -60,7 +60,8 @@ if (baseSyncEnabled || baseAdminEnabled) {
     requestTimeoutMs: Number(process.env.FEISHU_API_TIMEOUT_MS || 15_000),
   });
 }
-const understanding = process.env.LLM_ENABLED === "true"
+const agentEnabled = process.env.LLM_ENABLED === "true" && process.env.LLM_AGENT_ENABLED !== "false";
+const understanding = process.env.LLM_ENABLED === "true" && !agentEnabled
   ? new OpenAICompatibleUnderstandingClient({
     baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
     apiKey: process.env.LLM_API_KEY || "",
@@ -70,7 +71,7 @@ const understanding = process.env.LLM_ENABLED === "true"
     maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
   }, logger)
   : undefined;
-const agent = process.env.LLM_ENABLED === "true" && process.env.LLM_AGENT_ENABLED !== "false"
+const agent = agentEnabled
   ? new OpenAICompatibleAgentClient({
     baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
     apiKey: process.env.LLM_API_KEY || "",

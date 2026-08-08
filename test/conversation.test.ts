@@ -46,6 +46,28 @@ test("does not confuse a new requirement containing 地址 with the Base link qu
   assert.doesNotMatch(reply.text, /多维表格地址/);
 });
 
+test("lets the agent own requirement conversation and persistence through tools", async () => {
+  const store = new InMemoryRequirementStore();
+  const agent: AgentClient = {
+    async run(input, definitions, executor) {
+      assert.ok(definitions.some((item) => item.function.name === "save_requirement_draft"));
+      assert.ok(definitions.some((item) => item.function.name === "submit_requirement"));
+      if (input.message === "我想换 AppsFlyer push 地址") {
+        const result = await executor.execute("save_requirement_draft", JSON.stringify({ title: "AppsFlyer push 地址更换", goal: "恢复渠道回传", scope: "AppsFlyer push 配置", acceptanceCriteria: "新地址生效并完成回传验证" }));
+        assert.equal((result as Record<string, unknown>).ok, true);
+        return { usedTools: true, text: "已记录 AppsFlyer push 地址更换。请补充需要解决的业务目标。" };
+      }
+      const result = await executor.execute("submit_requirement", "{}");
+      assert.equal((result as Record<string, unknown>).ok, true);
+      return { usedTools: true, text: `已提交需求 ${(result as Record<string, unknown>).requirementId}` };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  assert.match((await service.handleMessage(message("我想换 AppsFlyer push 地址", "6d"))).text, /已记录 AppsFlyer/);
+  assert.match((await service.handleMessage(message("确认提交", "6e"))).text, /已提交需求 REQ-/);
+  assert.equal((await store.listRequirements()).length, 1);
+});
+
 test("does not echo bot messages", async () => {
   const store = new InMemoryRequirementStore();
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
@@ -168,7 +190,7 @@ test("rejects MCP confirmation from another group member and supports cancellati
   assert.equal(mcp.calls, 0);
 });
 
-test("submits a confirmed requirement without invoking the agent", async () => {
+test("falls back to deterministic submission when the agent is unavailable", async () => {
   const store = new InMemoryRequirementStore();
   let agentCalls = 0;
   const service = new ConversationService(store, {
@@ -184,7 +206,7 @@ test("submits a confirmed requirement without invoking the agent", async () => {
     },
   });
   assert.match((await service.handleMessage(message("确认提交", "29"))).text, /已记录需求 REQ-/);
-  assert.equal(agentCalls, 0);
+  assert.equal(agentCalls, 1);
 });
 
 test("does not let another group member edit or submit a requirement draft", async () => {

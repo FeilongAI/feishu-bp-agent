@@ -55,14 +55,14 @@ export class ConversationService {
     const baseUrlQuery = this.isBaseUrlQuery(text);
     const fieldDelete = this.parseFieldDeleteRequest(text);
     const fieldDeleteConfirmation = this.isFieldDeleteConfirmation(text);
-    const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation || ruleNewRequirement
+    const analysis = this.config.agent ? undefined : (ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation || ruleNewRequirement
       || adminQuery || baseUrlQuery || fieldDelete.requested || fieldDeleteConfirmation
       ? undefined
       : await this.analyze({
         message: text,
         recentMessages: conversation.recentMessages,
         draft: conversation.draft,
-      });
+      }));
     conversation.recentMessages = [...conversation.recentMessages, message.content].slice(-8);
     conversation.updatedAt = new Date().toISOString();
 
@@ -110,8 +110,8 @@ export class ConversationService {
       return { text: "已取消待确认的飞书操作。" };
     }
 
-    const deterministicRequirementFlow = ruleCancel || ruleConfirmation
-      || analysis?.intent === "cancel_requirement" || analysis?.intent === "confirm_requirement";
+    const deterministicRequirementFlow = !this.config.agent && (ruleCancel || ruleConfirmation
+      || analysis?.intent === "cancel_requirement" || analysis?.intent === "confirm_requirement");
     const draftOwnedByOther = Boolean(conversation.draft && conversation.draft.requesterId !== message.senderId);
     const mutatesDraft = deterministicRequirementFlow || (!ruleCurrentWork && !ruleMyRequirements && !adminQuery && !baseUrlQuery && !fieldDelete.requested && !fieldDeleteConfirmation);
     if (draftOwnedByOther && mutatesDraft) {
@@ -119,7 +119,8 @@ export class ConversationService {
       return { text: "当前群聊中的需求草稿由其他成员发起，只有发起人可以补充、取消或确认提交。" };
     }
 
-    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && !deterministicRequirementFlow && !ruleNewRequirement && this.config.agent) {
+    let agentCompleted = false;
+    if (this.config.agent && !fieldDeleteConfirmation) {
       const runtime = createAgentToolRuntime({
         message,
         store: this.store,
@@ -128,6 +129,8 @@ export class ConversationService {
         baseTableLabel: this.config.baseTableLabel || "多维表格",
         baseUrl: this.config.baseUrl,
         baseAdmin: this.config.baseAdmin,
+        conversation,
+        conversationKey: key,
       });
       const discoveredMcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
       const mcpTools = discoveredMcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name));
@@ -179,6 +182,7 @@ export class ConversationService {
         senderId: message.senderId,
         senderName: message.senderName,
       }, runtime.definitions, executor).catch(() => undefined);
+      agentCompleted = Boolean(agentResult);
       if (mcpActionConflict) {
         await this.store.saveConversation(conversation);
         return { text: "已有一项飞书写操作等待确认，请先确认或取消当前操作。" };
@@ -195,9 +199,9 @@ export class ConversationService {
         await this.store.saveConversation(conversation);
         return { text: "工具调用未成功，我没有把这次操作当作已完成。请检查权限或参数后重试。" };
       }
-      if (agentResult?.usedTools && agentResult.text) {
+      if (agentResult?.text || agentResult?.usedTools) {
         await this.store.saveConversation(conversation);
-        return { text: agentResult.text };
+        return { text: agentResult.text || "已处理这次请求。" };
       }
     }
 
@@ -300,7 +304,7 @@ export class ConversationService {
       delete conversation.draft;
     }
 
-    const confirmsRequirement = analysis?.intent === "confirm_requirement" || ruleConfirmation;
+    const confirmsRequirement = !agentCompleted && (analysis?.intent === "confirm_requirement" || ruleConfirmation);
     if (confirmsRequirement && !conversation.draft) {
       await this.store.saveConversation(conversation);
       return { text: "目前没有等待确认的需求草稿。请先告诉我你想解决的问题，我会逐步帮你整理。" };

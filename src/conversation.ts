@@ -1,7 +1,8 @@
 import type { BotReply, ConversationState, IncomingMessage, RequirementDraft, RequirementStore } from "./types.ts";
-import type { PendingBaseFieldDelete } from "./types.ts";
-import type { BaseField, BaseFieldAdmin } from "./feishuBase.ts";
-import type { ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
+import type { BaseFieldAdmin } from "./feishuBase.ts";
+import { createAgentToolRuntime } from "./agentTools.ts";
+import type { McpToolProvider } from "./mcpClient.ts";
+import type { AgentClient, ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 
 const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdMob", "Pangle", "Mintegral"];
 
@@ -10,6 +11,9 @@ export interface ConversationConfig {
   ownerName: string;
   baseAdmin?: BaseFieldAdmin;
   baseTableLabel?: string;
+  baseUrl?: string;
+  agent?: AgentClient;
+  mcp?: McpToolProvider;
 }
 
 export class ConversationService {
@@ -34,10 +38,11 @@ export class ConversationService {
     const ruleCancel = /^(取消|放弃|清空)(当前)?需求/.test(text);
     const ruleConfirmation = /^(确认|确认提交|提交|是的|可以提交)$/.test(text);
     const adminQuery = this.isAdminQuery(text);
+    const baseUrlQuery = this.isBaseUrlQuery(text);
     const fieldDelete = this.parseFieldDeleteRequest(text);
     const fieldDeleteConfirmation = this.isFieldDeleteConfirmation(text);
     const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation
-      || adminQuery || fieldDelete.requested || fieldDeleteConfirmation
+      || adminQuery || baseUrlQuery || fieldDelete.requested || fieldDeleteConfirmation
       ? undefined
       : await this.analyze({
         message: text,
@@ -47,9 +52,47 @@ export class ConversationService {
     conversation.recentMessages = [...conversation.recentMessages, message.content].slice(-8);
     conversation.updatedAt = new Date().toISOString();
 
+    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && this.config.agent) {
+      const runtime = createAgentToolRuntime({
+        message,
+        store: this.store,
+        ownerId: this.config.ownerId,
+        ownerName: this.config.ownerName,
+        baseTableLabel: this.config.baseTableLabel || "多维表格",
+        baseUrl: this.config.baseUrl,
+        baseAdmin: this.config.baseAdmin,
+      });
+      const mcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
+      runtime.definitions.push(...mcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name)));
+      const executor = {
+        execute: async (name: string, argumentsJson: string) => {
+          if (mcpTools.some((tool) => tool.function.name === name)) return this.config.mcp!.callTool(name, argumentsJson);
+          return runtime.executor.execute(name, argumentsJson);
+        },
+      };
+      const agentResult = await this.config.agent.run({
+        message: text,
+        recentMessages: conversation.recentMessages.slice(0, -1),
+        draft: conversation.draft,
+        senderId: message.senderId,
+        senderName: message.senderName,
+      }, runtime.definitions, executor).catch(() => undefined);
+      if (agentResult?.usedTools && agentResult.text) {
+        await this.store.saveConversation(conversation);
+        return { text: agentResult.text };
+      }
+    }
+
     if (adminQuery) {
       await this.store.saveConversation(conversation);
       return { text: `当前管理员是${this.config.ownerName}（${this.config.ownerId || "未配置 OWNER_OPEN_ID"}）。只有管理员可以执行多维表格字段删除等高风险操作。` };
+    }
+
+    if (baseUrlQuery) {
+      await this.store.saveConversation(conversation);
+      return this.config.baseUrl
+        ? { text: `${this.config.baseTableLabel || "需求多维表格"}地址：${this.config.baseUrl}` }
+        : { text: "当前还没有配置需求多维表格地址。请管理员设置 FEISHU_BASE_URL 后重启服务。" };
     }
 
     if (fieldDeleteConfirmation && conversation.pendingBaseFieldDelete) {
@@ -187,6 +230,10 @@ export class ConversationService {
 
   private isAdminQuery(text: string): boolean {
     return /(?:谁是|哪个是|告诉我).*(?:管理员|负责人)|管理员(?:是谁|身份|可以做什么)/.test(text);
+  }
+
+  private isBaseUrlQuery(text: string): boolean {
+    return /(?:需求|多维表格|多维表|Base|bitable|表格).*(?:地址|链接|URL|url)|(?:地址|链接|URL|url).*(?:需求|多维表格|多维表|Base|bitable|表格)/i.test(text);
   }
 
   private isFieldDeleteConfirmation(text: string): boolean {

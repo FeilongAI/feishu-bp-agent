@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ConversationService } from "../src/conversation.ts";
 import { InMemoryRequirementStore } from "../src/store.ts";
+import type { AgentClient } from "../src/understanding.ts";
 
 const message = (content: string, id: string, senderId = "ou_requester") => ({ chatId: "oc_demo", senderId, messageId: `om_${id}`, content, senderType: "user" as const });
 
@@ -75,4 +76,21 @@ test("recognizes natural-language field deletion requests when the verb follows 
   });
   assert.match((await service.handleMessage(message("我要把多维表格模板的列进行删除", "14", "ou_owner"))).text, /请告诉我要删除的具体列名/);
   assert.match((await service.handleMessage(message("把负责人列删除", "15", "ou_owner"))).text, /确认删除/);
+});
+
+test("lets the configured agent answer the Base link query through a tool", async () => {
+  const store = new InMemoryRequirementStore();
+  const agent: AgentClient = {
+    async run(input, definitions, executor) {
+      assert.equal(input.message, "需求多维表格的地址是什么？");
+      assert.ok(definitions.some((item) => item.function.name === "get_requirement_table_link"));
+      const result = await executor.execute("get_requirement_table_link", "{}");
+      assert.deepEqual(result, { ok: true, label: "需求表", url: "https://feishu.cn/base/demo" });
+      return { usedTools: true, text: "需求表地址：https://feishu.cn/base/demo" };
+    },
+  };
+  const service = new ConversationService(store, {
+    ownerId: "ou_owner", ownerName: "韩飞龙", baseTableLabel: "需求表", baseUrl: "https://feishu.cn/base/demo", agent,
+  });
+  assert.equal((await service.handleMessage(message("需求多维表格的地址是什么？", "16"))).text, "需求表地址：https://feishu.cn/base/demo");
 });

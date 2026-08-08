@@ -10,7 +10,8 @@ import { MessageProcessor } from "./messageProcessor.ts";
 import { csvSet } from "./permissions.ts";
 import { PostgresRequirementStore } from "./postgres.ts";
 import { InMemoryRequirementStore } from "./store.ts";
-import { OpenAICompatibleUnderstandingClient } from "./understanding.ts";
+import { OpenAICompatibleAgentClient, OpenAICompatibleUnderstandingClient } from "./understanding.ts";
+import { LarkMcpClient, parseMcpToolAllowlist } from "./mcpClient.ts";
 
 const auth = {
   adminApiKey: process.env.ADMIN_API_KEY || "",
@@ -38,6 +39,9 @@ const store = process.env.DATABASE_URL
   : new InMemoryRequirementStore(process.env.DATA_FILE || "data/state.json");
 const baseSyncEnabled = process.env.BASE_SYNC_ENABLED === "true";
 const baseAdminEnabled = process.env.BASE_ADMIN_ENABLED === "true";
+const baseUrl = process.env.FEISHU_BASE_URL || (process.env.FEISHU_BASE_TOKEN && process.env.FEISHU_BASE_TABLE_ID
+  ? `https://feishu.cn/base/${encodeURIComponent(process.env.FEISHU_BASE_TOKEN)}?table=${encodeURIComponent(process.env.FEISHU_BASE_TABLE_ID)}`
+  : undefined);
 let baseClient: FeishuBaseClient | undefined;
 if (baseSyncEnabled || baseAdminEnabled) {
   if (!isBaseOutboxStore(store)) throw new Error("BASE_SYNC_ENABLED or BASE_ADMIN_ENABLED requires DATABASE_URL and PostgreSQL storage");
@@ -64,11 +68,32 @@ const understanding = process.env.LLM_ENABLED === "true"
     maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
   }, logger)
   : undefined;
+const agent = process.env.LLM_ENABLED === "true" && process.env.LLM_AGENT_ENABLED !== "false"
+  ? new OpenAICompatibleAgentClient({
+    baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
+    apiKey: process.env.LLM_API_KEY || "",
+    model: process.env.LLM_MODEL || "",
+    timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 8_000),
+    maxRetries: Number(process.env.LLM_MAX_RETRIES || 1),
+    maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
+  }, logger)
+  : undefined;
+const mcp = process.env.MCP_ENABLED === "true"
+  ? new LarkMcpClient({
+    url: process.env.MCP_URL || "",
+    toolAllowlist: parseMcpToolAllowlist(process.env.MCP_TOOL_ALLOWLIST),
+    maxTools: Number(process.env.MCP_MAX_TOOLS || 80),
+    timeoutMs: Number(process.env.MCP_TIMEOUT_MS || 15_000),
+  }, logger)
+  : undefined;
 const service = new ConversationService(store, {
   ownerId: process.env.OWNER_OPEN_ID || "",
   ownerName: process.env.OWNER_NAME || "负责人",
   baseAdmin: baseAdminEnabled ? baseClient : undefined,
   baseTableLabel: process.env.FEISHU_BASE_TABLE_LABEL || "多维表格",
+  baseUrl,
+  agent,
+  mcp,
 }, understanding);
 const processor = new MessageProcessor(store, service, {
   allowedTenantKeys: csvSet(process.env.ALLOWED_TENANT_KEYS),
@@ -112,6 +137,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     logger.info("shutdown_started", { signal });
     server.close(async () => {
       await baseSyncWorker?.stop();
+      await mcp?.close();
       await store.close();
       process.exit(0);
     });

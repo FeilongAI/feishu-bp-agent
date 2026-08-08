@@ -7,6 +7,7 @@ import { InMemoryRequirementStore } from "../src/store.ts";
 import type { IncomingMessage } from "../src/types.ts";
 import {
   OpenAICompatibleUnderstandingClient,
+  OpenAICompatibleAgentClient,
   type MessageUnderstanding,
   type UnderstandingClient,
 } from "../src/understanding.ts";
@@ -156,4 +157,27 @@ test("does not invoke semantic analysis again for a duplicate completed message"
   const duplicate = await processor.process(message("帮我看看之前提过什么", "30"));
   assert.deepEqual(duplicate, first);
   assert.equal(understanding.calls, 1);
+});
+
+test("runs an OpenAI-compatible tool call loop and returns the final answer", async () => {
+  const calls: Array<{ body: Record<string, unknown> }> = [];
+  const responses = [
+    { choices: [{ message: { content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "get_requirement_table_link", arguments: "{}" } }] } }] },
+    { choices: [{ message: { content: "需求表地址是：https://feishu.cn/base/demo", tool_calls: [] } }] },
+  ];
+  const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify(responses.shift()), { status: 200 });
+  }) as typeof fetch;
+  const client = new OpenAICompatibleAgentClient({ baseUrl: "https://llm.example.test/v1", apiKey: "key", model: "model", maxRetries: 0 }, silentLogger, fakeFetch);
+  let executed = 0;
+  const result = await client.run({ message: "需求多维表格的地址是什么？", recentMessages: [], senderId: "ou_requester" }, [{
+    type: "function", function: { name: "get_requirement_table_link", description: "获取地址", parameters: { type: "object" } },
+  }], {
+    async execute(name) { assert.equal(name, "get_requirement_table_link"); executed += 1; return { ok: true, url: "https://feishu.cn/base/demo" }; },
+  });
+  assert.deepEqual(result, { usedTools: true, text: "需求表地址是：https://feishu.cn/base/demo" });
+  assert.equal(executed, 1);
+  assert.deepEqual((calls[0].body.tools as Array<Record<string, unknown>>).length, 1);
+  assert.equal((calls[1].body.messages as Array<Record<string, unknown>>).at(-1)?.role, "tool");
 });

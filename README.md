@@ -16,6 +16,8 @@
 - JSON 结构化日志与敏感字段脱敏
 - PostgreSQL outbox 驱动的飞书 Base 可靠同步
 - 管理员通过聊天查询身份，并在确认后删除 Base 字段
+- 可选的 LLM 工具调用模式：模型判断是否查询需求、进展、管理员或 Base，并通过受控工具取数
+- 可选的官方 `lark-openapi-mcp` 服务桥接：动态发现并调用飞书文档、Base、IM 等工具
 
 ## Run
 
@@ -49,7 +51,8 @@ Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-dep
 
 飞书 Base 同步和字段管理使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。`OWNER_OPEN_ID` 是唯一管理员身份来源；只有该用户可以执行删除列，且必须在机器人展示目标字段后回复“确认删除”。设置 `BASE_ADMIN_ENABLED=true` 开启聊天字段管理，设置 `FEISHU_BASE_TABLE_LABEL` 调整回复中的表名。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。字段管理与确认状态使用 PostgreSQL 持久化，因此开启 `BASE_ADMIN_ENABLED` 时必须配置 `DATABASE_URL`。
 
-启用语义理解时设置 `LLM_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。服务调用兼容的 `/chat/completions` 接口，只接受经过校验的意图和需求字段；模型无法直接写数据库或操作飞书。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
+启用语义理解和工具调用时设置 `LLM_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`；`LLM_AGENT_ENABLED` 默认为开启。模型可通过受控工具查询需求多维表格地址、管理员、当前工作、发送者自己的需求和 Base 字段，工具结果会回到模型后再生成自然语言回答。工具不允许任意 shell/API 调用；新需求保存、字段删除和二次确认仍由服务侧确定性处理。若模型服务不支持 tools，系统会回退到原有结构化理解流程。`FEISHU_BASE_URL` 可配置完整 Base 链接；未配置时，若已有 `FEISHU_BASE_TOKEN` 和 `FEISHU_BASE_TABLE_ID`，服务会生成默认链接。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
+如需接入官方 `lark-openapi-mcp`，设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`，并启动 Compose 的 `mcp` profile。核心服务通过 MCP `tools/list` 动态加载工具，再把 `tools/call` 结果交给模型。生产环境应配置 `MCP_TOOL_ALLOWLIST`，只暴露业务需要的工具。
 
 管理接口：
 

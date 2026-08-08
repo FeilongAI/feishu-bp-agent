@@ -32,9 +32,32 @@ LLM_MODEL=your_model_name
 LLM_TIMEOUT_MS=8000
 LLM_MAX_RETRIES=1
 LLM_MAX_INPUT_CHARS=6000
+LLM_AGENT_ENABLED=true
 ```
 
 The provider must implement `POST /chat/completions` and JSON object response mode. Keep `LLM_API_KEY` only in the server environment. Requirement messages and a bounded amount of recent conversation context are sent to this provider, so choose the provider and data-retention policy according to your privacy requirements. If the provider times out, returns an error, or returns malformed data, the service continues with the built-in deterministic rules.
+
+When agent mode is enabled, the model can call only the allowlisted BP tools for the requirement Base link, administrator identity, current work, the sender's own requirements, and Base fields. The service executes tools and sends the results back to the model. It does not expose arbitrary shell commands or Feishu API paths to the model.
+
+## Official Lark MCP bridge
+
+The repository includes an optional `lark-mcp` Compose profile. It runs the official `@larksuiteoapi/lark-mcp` package in streamable HTTP mode and keeps its Feishu credentials in the MCP container:
+
+```dotenv
+MCP_ENABLED=true
+MCP_URL=http://lark-mcp:3000/mcp
+MCP_TOOL_ALLOWLIST=bitable_v1_app_get,bitable_v1_app_table_list,bitable_v1_app_table_field_list,docx_v1_document_raw_content_get
+MCP_LARK_TOOLS=bitable.v1.app.get,bitable.v1.appTable.list,bitable.v1.appTableField.list,docx.v1.document.rawContent.get
+```
+
+Build and start the profile together with the core services:
+
+```bash
+docker compose --profile mcp build
+docker compose --profile mcp up -d
+```
+
+The MCP server exposes only the tools named by `MCP_LARK_TOOLS`; the core client applies a second `MCP_TOOL_ALLOWLIST` filter and removes mutating tool names (`create`, `delete`, `update`, `patch`, `send`, and similar) before exposing them to the model. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
 
 ## 2. Build and run against an existing PostgreSQL
 

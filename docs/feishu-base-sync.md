@@ -55,6 +55,7 @@ FEISHU_APP_SECRET=server_secret
 FEISHU_BASE_TOKEN=bascn_xxx
 FEISHU_BASE_TABLE_ID=tbl_xxx
 FEISHU_BASE_TABLE_LABEL=需求表
+FEISHU_BASE_URL=https://feishu.cn/base/bascn_xxx?table=tbl_xxx
 BASE_SYNC_BATCH_SIZE=20
 BASE_SYNC_POLL_MS=5000
 ```

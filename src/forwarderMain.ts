@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
-import { EventDeliveryService, FileSpoolStore, CoreAgentHttpClient, LarkCliReplySender } from "./forwarder.ts";
+import { EventDeliveryService, FileSpoolStore, CoreAgentHttpClient, LarkCliReplySender, LarkCliSenderDirectory } from "./forwarder.ts";
 import { logger } from "./logger.ts";
 
 function numberEnv(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -26,6 +26,7 @@ const delivery = new EventDeliveryService(
     maxRetries: numberEnv("FORWARDER_MAX_RETRIES", 5, 0, 10),
     retryBaseMs: numberEnv("FORWARDER_RETRY_BASE_MS", 500, 10, 30_000),
   },
+  new LarkCliSenderDirectory(bin),
 );
 
 const state: { ready: boolean; startedAt: string; connectedAt?: string; lastEventAt?: string; restarts: number } = {

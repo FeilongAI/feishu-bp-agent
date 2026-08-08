@@ -24,7 +24,7 @@ if (process.env.NODE_ENV === "production") {
     INGRESS_API_KEY: auth.ingressApiKey,
     CONFIRMATION_SECRET: process.env.CONFIRMATION_SECRET || "",
     DATABASE_URL: process.env.DATABASE_URL || "",
-    ...(process.env.BASE_SYNC_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
+    ...(process.env.BASE_SYNC_ENABLED === "true" || process.env.BASE_ADMIN_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
     ...(process.env.LLM_ENABLED === "true" ? { LLM_API_KEY: process.env.LLM_API_KEY || "" } : {}),
   };
   const invalid = Object.entries(productionSecrets)
@@ -36,6 +36,24 @@ if (process.env.NODE_ENV === "production") {
 const store = process.env.DATABASE_URL
   ? new PostgresRequirementStore(process.env.DATABASE_URL)
   : new InMemoryRequirementStore(process.env.DATA_FILE || "data/state.json");
+const baseSyncEnabled = process.env.BASE_SYNC_ENABLED === "true";
+const baseAdminEnabled = process.env.BASE_ADMIN_ENABLED === "true";
+let baseClient: FeishuBaseClient | undefined;
+if (baseSyncEnabled || baseAdminEnabled) {
+  if (!isBaseOutboxStore(store)) throw new Error("BASE_SYNC_ENABLED or BASE_ADMIN_ENABLED requires DATABASE_URL and PostgreSQL storage");
+  const required = ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_BASE_TOKEN", "FEISHU_BASE_TABLE_ID"] as const;
+  const missing = required.filter((name) => !process.env[name]);
+  if (missing.length) throw new Error(`Base configuration missing: ${missing.join(", ")}`);
+  baseClient = new FeishuBaseClient({
+    appId: process.env.FEISHU_APP_ID!,
+    appSecret: process.env.FEISHU_APP_SECRET!,
+    baseToken: process.env.FEISHU_BASE_TOKEN!,
+    tableId: process.env.FEISHU_BASE_TABLE_ID!,
+    apiBaseUrl: process.env.FEISHU_API_BASE_URL,
+    fieldMap: parseBaseFieldMap(process.env.FEISHU_BASE_FIELD_MAP),
+    requestTimeoutMs: Number(process.env.FEISHU_API_TIMEOUT_MS || 15_000),
+  });
+}
 const understanding = process.env.LLM_ENABLED === "true"
   ? new OpenAICompatibleUnderstandingClient({
     baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
@@ -46,7 +64,12 @@ const understanding = process.env.LLM_ENABLED === "true"
     maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
   }, logger)
   : undefined;
-const service = new ConversationService(store, { ownerId: process.env.OWNER_OPEN_ID || "", ownerName: process.env.OWNER_NAME || "负责人" }, understanding);
+const service = new ConversationService(store, {
+  ownerId: process.env.OWNER_OPEN_ID || "",
+  ownerName: process.env.OWNER_NAME || "负责人",
+  baseAdmin: baseAdminEnabled ? baseClient : undefined,
+  baseTableLabel: process.env.FEISHU_BASE_TABLE_LABEL || "多维表格",
+}, understanding);
 const processor = new MessageProcessor(store, service, {
   allowedTenantKeys: csvSet(process.env.ALLOWED_TENANT_KEYS),
   allowedUserIds: csvSet(process.env.ALLOWED_USER_IDS),
@@ -60,21 +83,8 @@ const port = Number(process.env.PORT || 8090);
 const host = process.env.HOST || "127.0.0.1";
 
 let baseSyncWorker: BaseSyncWorker | undefined;
-if (process.env.BASE_SYNC_ENABLED === "true") {
-  if (!isBaseOutboxStore(store)) throw new Error("BASE_SYNC_ENABLED requires DATABASE_URL and PostgreSQL storage");
-  const required = ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_BASE_TOKEN", "FEISHU_BASE_TABLE_ID"] as const;
-  const missing = required.filter((name) => !process.env[name]);
-  if (missing.length) throw new Error(`Base sync configuration missing: ${missing.join(", ")}`);
-  const baseClient = new FeishuBaseClient({
-    appId: process.env.FEISHU_APP_ID!,
-    appSecret: process.env.FEISHU_APP_SECRET!,
-    baseToken: process.env.FEISHU_BASE_TOKEN!,
-    tableId: process.env.FEISHU_BASE_TABLE_ID!,
-    apiBaseUrl: process.env.FEISHU_API_BASE_URL,
-    fieldMap: parseBaseFieldMap(process.env.FEISHU_BASE_FIELD_MAP),
-    requestTimeoutMs: Number(process.env.FEISHU_API_TIMEOUT_MS || 15_000),
-  });
-  baseSyncWorker = new BaseSyncWorker(store, baseClient, logger, {
+if (baseSyncEnabled) {
+  baseSyncWorker = new BaseSyncWorker(store, baseClient!, logger, {
     batchSize: Number(process.env.BASE_SYNC_BATCH_SIZE || 20),
     pollIntervalMs: Number(process.env.BASE_SYNC_POLL_MS || 5_000),
   });

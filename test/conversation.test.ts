@@ -31,3 +31,48 @@ test("does not echo bot messages", async () => {
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
   assert.equal((await service.handleMessage({ ...message("hello", "8"), senderType: "bot" })).text, "");
 });
+
+test("reports the configured administrator and protects Base field deletion", async () => {
+  const store = new InMemoryRequirementStore();
+  const deleted: string[] = [];
+  const baseAdmin = {
+    async listFields() { return [
+      { fieldId: "fld_owner", name: "负责人" },
+      { fieldId: "fld_title", name: "需求标题", isPrimary: true },
+    ]; },
+    async deleteField(fieldId: string) { deleted.push(fieldId); },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", baseAdmin, baseTableLabel: "需求表" });
+
+  assert.match((await service.handleMessage(message("谁是管理员", "9"))).text, /韩飞龙（ou_owner）/);
+  assert.match((await service.handleMessage(message("删除需求表的列：负责人", "10", "ou_requester"))).text, /只有管理员/);
+  assert.match((await service.handleMessage(message("删除需求表的列：负责人", "11", "ou_owner"))).text, /确认删除/);
+  assert.deepEqual(deleted, []);
+  assert.match((await service.handleMessage(message("确认删除", "12", "ou_owner"))).text, /已删除需求表中的列“负责人”/);
+  assert.deepEqual(deleted, ["fld_owner"]);
+});
+
+test("does not allow deletion of the Base primary field", async () => {
+  const store = new InMemoryRequirementStore();
+  const service = new ConversationService(store, {
+    ownerId: "ou_owner", ownerName: "韩飞龙",
+    baseAdmin: {
+      async listFields() { return [{ fieldId: "fld_title", name: "需求标题", isPrimary: true }]; },
+      async deleteField() { assert.fail("primary field must not be deleted"); },
+    },
+  });
+  assert.match((await service.handleMessage(message("删除多维表格的列：需求标题", "13", "ou_owner"))).text, /主字段，不能删除/);
+});
+
+test("recognizes natural-language field deletion requests when the verb follows the column", async () => {
+  const store = new InMemoryRequirementStore();
+  const service = new ConversationService(store, {
+    ownerId: "ou_owner", ownerName: "韩飞龙",
+    baseAdmin: {
+      async listFields() { return [{ fieldId: "fld_owner", name: "负责人" }]; },
+      async deleteField() {},
+    },
+  });
+  assert.match((await service.handleMessage(message("我要把多维表格模板的列进行删除", "14", "ou_owner"))).text, /请告诉我要删除的具体列名/);
+  assert.match((await service.handleMessage(message("把负责人列删除", "15", "ou_owner"))).text, /确认删除/);
+});

@@ -32,7 +32,7 @@ export interface SpoolStore {
   count(): Promise<number>;
 }
 
-export type CommandRunner = (command: string, args: string[]) => Promise<{ code: number | null; stderr: string }>;
+export type CommandRunner = (command: string, args: string[]) => Promise<{ code: number | null; stdout?: string; stderr: string }>;
 
 class CoreAgentError extends Error {
   readonly retryable: boolean;
@@ -108,11 +108,13 @@ export class CoreAgentHttpClient implements CoreAgent {
 }
 
 export const runCommand: CommandRunner = (command, args) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
   let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout = (stdout + String(chunk)).slice(-20_000); });
   child.stderr.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-4_000); });
   child.on("error", reject);
-  child.on("close", (code) => resolve({ code, stderr }));
+  child.on("close", (code) => resolve({ code, stdout, stderr }));
 });
 
 export class LarkCliReplySender implements ReplySender {
@@ -139,6 +141,46 @@ export class LarkCliReplySender implements ReplySender {
       throw new Error(`lark_reply_failed:${reason}:exit_${result.code}`);
     }
   }
+}
+
+export class LarkCliSenderDirectory {
+  private readonly bin: string;
+  private readonly runner: CommandRunner;
+  private readonly cacheTtlMs: number;
+  private readonly cache = new Map<string, { name?: string; expiresAt: number }>();
+
+  constructor(bin = "lark-cli", runner: CommandRunner = runCommand, cacheTtlMs = 86_400_000) {
+    this.bin = bin;
+    this.runner = runner;
+    this.cacheTtlMs = Math.max(60_000, cacheTtlMs);
+  }
+
+  async enrich(message: IncomingMessage): Promise<IncomingMessage> {
+    if (message.senderName || !message.senderId) return message;
+    const now = Date.now();
+    const cached = this.cache.get(message.senderId);
+    if (cached && cached.expiresAt > now) return cached.name ? { ...message, senderName: cached.name } : message;
+    const result = await this.runner(this.bin, ["contact", "+get-user", "--user-id", message.senderId, "--user-id-type", "open_id", "--as", "bot"]);
+    const name = result.code === 0 ? extractUserName(result.stdout || "") : undefined;
+    this.cache.set(message.senderId, { name, expiresAt: now + (name ? this.cacheTtlMs : 300_000) });
+    return name ? { ...message, senderName: name } : message;
+  }
+}
+
+function extractUserName(stdout: string): string | undefined {
+  const lines = stdout.trim().split(/\r?\n/).reverse();
+  for (const line of lines) {
+    try {
+      const payload = JSON.parse(line) as Record<string, unknown>;
+      const data = payload.data && typeof payload.data === "object" ? payload.data as Record<string, unknown> : payload;
+      const user = data.user && typeof data.user === "object" ? data.user as Record<string, unknown> : data;
+      const localized = user.name_i18n && typeof user.name_i18n === "object" ? user.name_i18n as Record<string, unknown> : {};
+      for (const value of [user.name, user.display_name, user.user_name, localized.zh_cn, localized["zh-CN"], localized.en_us]) {
+        if (typeof value === "string" && value.trim()) return value.trim().slice(0, 120);
+      }
+    } catch { /* CLI may include non-JSON diagnostics; try the next line */ }
+  }
+  return undefined;
 }
 
 export class FileSpoolStore implements SpoolStore {
@@ -194,13 +236,15 @@ export class EventDeliveryService {
   private readonly replies: ReplySender;
   private readonly logger: Logger;
   private readonly config: DeliveryConfig;
+  private readonly directory?: LarkCliSenderDirectory;
   private readonly active = new Set<string>();
 
-  constructor(spool: SpoolStore, core: CoreAgent, replies: ReplySender, logger: Logger, config: DeliveryConfig) {
+  constructor(spool: SpoolStore, core: CoreAgent, replies: ReplySender, logger: Logger, config: DeliveryConfig, directory?: LarkCliSenderDirectory) {
     this.spool = spool;
     this.core = core;
     this.replies = replies;
     this.logger = logger;
+    this.directory = directory;
     this.config = {
       maxRetries: bounded(config.maxRetries, 5, 0, 10),
       retryBaseMs: bounded(config.retryBaseMs, 500, 10, 30_000),
@@ -210,8 +254,9 @@ export class EventDeliveryService {
   async accept(rawEvent: Record<string, unknown>): Promise<boolean> {
     const message = normalizeLarkEvent(rawEvent);
     if (!message) return true;
-    await this.spool.save(message);
-    return this.deliver(message);
+    const enriched = this.directory ? await this.directory.enrich(message).catch(() => message) : message;
+    await this.spool.save(enriched);
+    return this.deliver(enriched);
   }
 
   async replay(): Promise<void> {

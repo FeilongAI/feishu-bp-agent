@@ -15,6 +15,7 @@
 - 消息幂等、跨实例会话锁、高风险管理操作二次确认
 - JSON 结构化日志与敏感字段脱敏
 - PostgreSQL outbox 驱动的飞书 Base 可靠同步
+- 管理员通过聊天查询身份，并在确认后删除 Base 字段
 
 ## Run
 
@@ -46,7 +47,7 @@ curl -X POST http://127.0.0.1:8090/api/messages \
 
 Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-deploy.md)，PM2/systemd 参见 [docs/process-manager-deploy.md](docs/process-manager-deploy.md)。容器内通过 `HOST=0.0.0.0` 对宿主机暴露服务；本地开发默认只监听 `127.0.0.1`。消息网关只允许单实例运行，核心 HTTP 服务仍可水平扩容。
 
-飞书 Base 同步使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。
+飞书 Base 同步和字段管理使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。`OWNER_OPEN_ID` 是唯一管理员身份来源；只有该用户可以执行删除列，且必须在机器人展示目标字段后回复“确认删除”。设置 `BASE_ADMIN_ENABLED=true` 开启聊天字段管理，设置 `FEISHU_BASE_TABLE_LABEL` 调整回复中的表名。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。字段管理与确认状态使用 PostgreSQL 持久化，因此开启 `BASE_ADMIN_ENABLED` 时必须配置 `DATABASE_URL`。
 
 启用语义理解时设置 `LLM_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。服务调用兼容的 `/chat/completions` 接口，只接受经过校验的意图和需求字段；模型无法直接写数据库或操作飞书。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
 

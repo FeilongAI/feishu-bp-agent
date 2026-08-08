@@ -12,11 +12,20 @@ This gives the service these guarantees:
 
 ## Base preparation
 
-Create a Base table and add the application as a document application with edit permission. In the developer console grant the minimal record scopes required by the enabled workflow:
+Create a Base table and add the application as a document application with edit permission. In the developer console grant the minimal scopes required by the enabled workflow:
 
 - `base:record:create`
 - `base:record:update`
 - `base:record:delete`
+
+For chat-driven field administration, also grant the Base field read/delete scopes exposed by your tenant (the console may label these as field schema read and field delete). Enable it with:
+
+```dotenv
+BASE_ADMIN_ENABLED=true
+FEISHU_BASE_TABLE_LABEL=需求表
+```
+
+`OWNER_OPEN_ID` is the only administrator allowlist entry. A field deletion request from any other sender is rejected. The agent first lists fields, refuses to delete the primary field, shows the exact field name and ID, and only deletes after the administrator replies `确认删除` within 10 minutes. The pending confirmation is stored in PostgreSQL, so `DATABASE_URL` is required when this feature is enabled.
 
 The adapter uses the official `bitable/v1` record APIs with `tenant_access_token`. It does not use a developer laptop's `lark-cli` session or macOS Keychain.
 
@@ -40,10 +49,12 @@ Do not configure the ID fields as Feishu user/group fields. The IDs originate fr
 
 ```dotenv
 BASE_SYNC_ENABLED=true
+BASE_ADMIN_ENABLED=false
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=server_secret
 FEISHU_BASE_TOKEN=bascn_xxx
 FEISHU_BASE_TABLE_ID=tbl_xxx
+FEISHU_BASE_TABLE_LABEL=需求表
 BASE_SYNC_BATCH_SIZE=20
 BASE_SYNC_POLL_MS=5000
 ```

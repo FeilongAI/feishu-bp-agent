@@ -86,3 +86,5 @@ Compose builds a separate `feishu-bp-forwarder` image containing the pinned offi
 The forwarder initializes its Bot application profile from secret stdin, maintains the long-running event consumer, persists messages before delivery, retries failures, and sends idempotent replies. Keep `RUN_LARK_CONSUMER=false` on the core service to avoid duplicate consumers. Full setup and verification are documented in [lark-message-gateway.md](lark-message-gateway.md).
 
 Feishu Base sync is different: it runs inside the service through application credentials and direct OpenAPI. See [feishu-base-sync.md](feishu-base-sync.md).
+
+To allow the administrator to delete Base columns from chat, set `BASE_ADMIN_ENABLED=true` and configure `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_BASE_TOKEN`, `FEISHU_BASE_TABLE_ID`, and `OWNER_OPEN_ID`. Grant the Base field read/delete scopes to the application. The agent always shows the exact field and requires `确认删除`; it never deletes the primary field or accepts this operation from another sender. Confirmation state is stored in PostgreSQL.

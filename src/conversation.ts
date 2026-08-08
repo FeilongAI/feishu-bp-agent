@@ -1,4 +1,6 @@
 import type { BotReply, ConversationState, IncomingMessage, RequirementDraft, RequirementStore } from "./types.ts";
+import type { PendingBaseFieldDelete } from "./types.ts";
+import type { BaseField, BaseFieldAdmin } from "./feishuBase.ts";
 import type { ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 
 const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdMob", "Pangle", "Mintegral"];
@@ -6,6 +8,8 @@ const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdM
 export interface ConversationConfig {
   ownerId: string;
   ownerName: string;
+  baseAdmin?: BaseFieldAdmin;
+  baseTableLabel?: string;
 }
 
 export class ConversationService {
@@ -29,7 +33,11 @@ export class ConversationService {
     const ruleMyRequirements = this.isMyRequirementsQuery(text);
     const ruleCancel = /^(取消|放弃|清空)(当前)?需求/.test(text);
     const ruleConfirmation = /^(确认|确认提交|提交|是的|可以提交)$/.test(text);
+    const adminQuery = this.isAdminQuery(text);
+    const fieldDelete = this.parseFieldDeleteRequest(text);
+    const fieldDeleteConfirmation = this.isFieldDeleteConfirmation(text);
     const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation
+      || adminQuery || fieldDelete.requested || fieldDeleteConfirmation
       ? undefined
       : await this.analyze({
         message: text,
@@ -38,6 +46,77 @@ export class ConversationService {
       });
     conversation.recentMessages = [...conversation.recentMessages, message.content].slice(-8);
     conversation.updatedAt = new Date().toISOString();
+
+    if (adminQuery) {
+      await this.store.saveConversation(conversation);
+      return { text: `当前管理员是${this.config.ownerName}（${this.config.ownerId || "未配置 OWNER_OPEN_ID"}）。只有管理员可以执行多维表格字段删除等高风险操作。` };
+    }
+
+    if (fieldDeleteConfirmation && conversation.pendingBaseFieldDelete) {
+      if (!this.isAdmin(message)) {
+        await this.store.saveConversation(conversation);
+        return { text: `这项操作只有管理员${this.config.ownerName}可以执行。` };
+      }
+      if (Date.parse(conversation.pendingBaseFieldDelete.expiresAt) <= Date.now()) {
+        delete conversation.pendingBaseFieldDelete;
+        await this.store.saveConversation(conversation);
+        return { text: "这条删除确认已过期。请重新说明要删除的列，我会先展示目标并再次确认。" };
+      }
+      if (!this.config.baseAdmin) {
+        await this.store.saveConversation(conversation);
+        return { text: "当前服务还没有启用 Base 字段管理能力，请配置 BASE_ADMIN_ENABLED=true 后重启。" };
+      }
+      const pending = conversation.pendingBaseFieldDelete;
+      try {
+        await this.config.baseAdmin.deleteField(pending.fieldId);
+        delete conversation.pendingBaseFieldDelete;
+        await this.store.saveConversation(conversation);
+        return { text: `已删除${this.config.baseTableLabel || "多维表格"}中的列“${pending.fieldName}”。` };
+      } catch (error) {
+        await this.store.saveConversation(conversation);
+        return { text: `删除列“${pending.fieldName}”失败，未完成任何其他操作。请检查 Base 权限或字段是否仍存在。` };
+      }
+    }
+
+    if (fieldDelete.requested) {
+      if (!this.isAdmin(message)) {
+        await this.store.saveConversation(conversation);
+        return { text: `这项操作只有管理员${this.config.ownerName}可以执行。` };
+      }
+      if (!this.config.baseAdmin) {
+        await this.store.saveConversation(conversation);
+        return { text: "当前服务还没有启用 Base 字段管理能力，请配置 BASE_ADMIN_ENABLED=true 后重启。" };
+      }
+      if (!fieldDelete.fieldName) {
+        await this.store.saveConversation(conversation);
+        return { text: `请告诉我要删除的具体列名，例如“删除${this.config.baseTableLabel || "多维表格"}的列：负责人”。` };
+      }
+      const fields = await this.config.baseAdmin.listFields().catch(() => []);
+      const matches = fields.filter((field) => field.fieldId.toLowerCase() === fieldDelete.fieldName!.toLowerCase() || field.name.trim().toLowerCase() === fieldDelete.fieldName!.toLowerCase());
+      if (!matches.length) {
+        await this.store.saveConversation(conversation);
+        const available = fields.slice(0, 20).map((field) => field.name).join("、");
+        return { text: `没有找到列“${fieldDelete.fieldName}”。${available ? `当前可见列包括：${available}。` : "暂时无法读取当前字段列表，请检查 Base 权限。"}` };
+      }
+      if (matches.length > 1) {
+        await this.store.saveConversation(conversation);
+        return { text: `找到多个同名列“${fieldDelete.fieldName}”，请改用字段 ID：${matches.map((field) => `${field.name}（${field.fieldId}）`).join("、")}。` };
+      }
+      const field = matches[0];
+      if (field.isPrimary) {
+        await this.store.saveConversation(conversation);
+        return { text: `列“${field.name}”是多维表格主字段，不能删除；可以考虑重命名或清空其内容。` };
+      }
+      conversation.pendingBaseFieldDelete = {
+        fieldId: field.fieldId,
+        fieldName: field.name,
+        requestedById: message.senderId,
+        requestedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      };
+      await this.store.saveConversation(conversation);
+      return { text: `你要删除${this.config.baseTableLabel || "多维表格"}中的列“${field.name}”（${field.fieldId}）。删除后该列及其数据可能无法恢复。确认执行请回复“确认删除”。` };
+    }
 
     if (analysis?.intent === "current_work_query" || ruleCurrentWork) {
       await this.store.saveConversation(conversation);
@@ -100,6 +179,30 @@ export class ConversationService {
 
   private newConversation(message: IncomingMessage, key: string): ConversationState {
     return { key, chatId: message.chatId, senderId: message.senderId, senderName: message.senderName, threadId: message.threadId, recentMessages: [], updatedAt: new Date().toISOString() };
+  }
+
+  private isAdmin(message: IncomingMessage): boolean {
+    return Boolean(this.config.ownerId && message.senderId === this.config.ownerId);
+  }
+
+  private isAdminQuery(text: string): boolean {
+    return /(?:谁是|哪个是|告诉我).*(?:管理员|负责人)|管理员(?:是谁|身份|可以做什么)/.test(text);
+  }
+
+  private isFieldDeleteConfirmation(text: string): boolean {
+    return /^(确认删除|确认执行删除|执行删除|确认)$/i.test(text.trim());
+  }
+
+  private parseFieldDeleteRequest(text: string): { requested: boolean; fieldName?: string } {
+    const requested = /(?:多维表格|多维表|Base|bitable|表格).*(?:删除|删掉|移除|去掉).*(?:列|字段)|(?:删除|删掉|移除|去掉).*(?:列|字段)|(?:列|字段).*(?:删除|删掉|移除|去掉)/i.test(text);
+    if (!requested) return { requested: false };
+    const afterColumn = text.match(/(?:列|字段)\s*(?:是|为|叫|名为|[:：])?\s*[「『“"【]?([\s\S]+?)[」』”"】]?\s*(?:删除|删掉|移除|去掉)?$/i)?.[1];
+    const beforeColumn = text.match(/[「『“"【]?([^「『“"【】」』”"，。:：]+?)[」』”"】]?\s*(?:列|字段)\s*(?:进行|执行)?\s*(?:删除|删掉|移除|去掉)$/i)?.[1];
+    const candidates = [afterColumn, beforeColumn]
+      .map((candidate) => candidate?.trim().replace(/^(进行|执行)\s*/, "").replace(/[，。！!？?]+$/, "").trim())
+      .map((candidate) => candidate?.replace(/^(?:把|将)\s*/, "").replace(/^.*(?:的|中|内)\s*/, "").trim())
+      .filter((candidate): candidate is string => Boolean(candidate) && !/^(进行|执行|删除|删掉|移除|去掉|一下|操作)$/.test(candidate));
+    return { requested: true, fieldName: candidates[0] };
   }
 
   private createDraft(message: IncomingMessage, key: string, firstMessage: string): RequirementDraft {

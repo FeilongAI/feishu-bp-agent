@@ -8,6 +8,7 @@ import {
   EventDeliveryService,
   FileSpoolStore,
   LarkCliReplySender,
+  LarkCliSenderDirectory,
   type CoreAgent,
   type ReplySender,
 } from "../src/forwarder.ts";
@@ -43,6 +44,25 @@ test("forwards a normalized event to the core API with ingress authentication", 
   assert.equal((calls[0].init?.headers as Record<string, string>).authorization, "Bearer ingress-secret");
   const body = JSON.parse(String(calls[0].init?.body)) as IncomingMessage;
   assert.equal(body.messageId, "om_1");
+});
+
+test("resolves the sender name through the contact CLI before delivery", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const directory = new LarkCliSenderDirectory("lark-cli-test", async (command, args) => {
+    calls.push({ command, args });
+    return { code: 0, stdout: JSON.stringify({ data: { user: { name: "张三" } } }), stderr: "" };
+  });
+  const enriched = await directory.enrich({ chatId: "oc_demo", senderId: "ou_user", messageId: "om_name", content: "hello" });
+  assert.equal(enriched.senderName, "张三");
+  assert.equal(calls[0].args[calls[0].args.indexOf("--user-id") + 1], "ou_user");
+  await directory.enrich({ chatId: "oc_demo", senderId: "ou_user", messageId: "om_name_2", content: "hello" });
+  assert.equal(calls.length, 1);
+});
+
+test("falls back to open_id when contact lookup fails", async () => {
+  const directory = new LarkCliSenderDirectory("lark-cli-test", async () => ({ code: 1, stdout: "", stderr: "permission denied" }));
+  const message = { chatId: "oc_demo", senderId: "ou_user", messageId: "om_name_fail", content: "hello" };
+  assert.equal((await directory.enrich(message)).senderName, undefined);
 });
 
 test("spools before delivery and replays after a transient failure", async () => {

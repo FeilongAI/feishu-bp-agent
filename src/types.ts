@@ -53,8 +53,17 @@ export interface ConversationState {
   senderName?: string;
   threadId?: string;
   draft?: RequirementDraft;
+  pendingBaseFieldDelete?: PendingBaseFieldDelete;
   recentMessages: string[];
   updatedAt: string;
+}
+
+export interface PendingBaseFieldDelete {
+  fieldId: string;
+  fieldName: string;
+  requestedById: string;
+  requestedAt: string;
+  expiresAt: string;
 }
 
 export interface IncomingMessage {

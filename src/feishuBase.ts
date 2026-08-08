@@ -59,6 +59,18 @@ export interface BaseRecordClient {
   deleteRequirement(recordId: string): Promise<void>;
 }
 
+export interface BaseField {
+  fieldId: string;
+  name: string;
+  type?: string;
+  isPrimary?: boolean;
+}
+
+export interface BaseFieldAdmin {
+  listFields(): Promise<BaseField[]>;
+  deleteField(fieldId: string): Promise<void>;
+}
+
 export class FeishuApiError extends Error {
   readonly status: number;
   readonly code?: number;
@@ -80,7 +92,7 @@ function compactFields(fields: Record<string, unknown>): Record<string, unknown>
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined && value !== ""));
 }
 
-export class FeishuBaseClient implements BaseRecordClient {
+export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   private readonly config: Required<Omit<FeishuBaseConfig, "fieldMap">> & { fieldMap: BaseFieldMap };
   private readonly fetchImpl: typeof fetch;
   private accessToken?: string;
@@ -117,6 +129,36 @@ export class FeishuBaseClient implements BaseRecordClient {
     }
   }
 
+  async listFields(): Promise<BaseField[]> {
+    const fields: BaseField[] = [];
+    let pageToken: string | undefined;
+    do {
+      const query = new URLSearchParams({ page_size: "200" });
+      if (pageToken) query.set("page_token", pageToken);
+      const data = await this.request("GET", `${this.fieldsPath()}?${query.toString()}`);
+      const items = Array.isArray(data.items) ? data.items : Array.isArray(data.fields) ? data.fields : [];
+      for (const item of items) {
+        const field = this.asObject(item);
+        const fieldId = field.field_id ?? field.fieldId ?? field.id;
+        const name = field.name ?? field.field_name ?? field.fieldName;
+        if (typeof fieldId !== "string" || typeof name !== "string") continue;
+        fields.push({
+          fieldId,
+          name,
+          type: typeof field.type === "string" ? field.type : undefined,
+          isPrimary: field.is_primary === true || field.isPrimary === true,
+        });
+      }
+      pageToken = typeof data.page_token === "string" && data.page_token ? data.page_token : undefined;
+      if (data.has_more !== true) pageToken = undefined;
+    } while (pageToken);
+    return fields;
+  }
+
+  async deleteField(fieldId: string): Promise<void> {
+    await this.request("DELETE", `${this.fieldsPath()}/${encodeURIComponent(fieldId)}`);
+  }
+
   requirementFields(requirement: Requirement): Record<string, unknown> {
     const field = this.config.fieldMap;
     return compactFields({
@@ -143,6 +185,10 @@ export class FeishuBaseClient implements BaseRecordClient {
 
   private recordsPath(): string {
     return `/bitable/v1/apps/${encodeURIComponent(this.config.baseToken)}/tables/${encodeURIComponent(this.config.tableId)}/records`;
+  }
+
+  private fieldsPath(): string {
+    return `/base/v3/bases/${encodeURIComponent(this.config.baseToken)}/tables/${encodeURIComponent(this.config.tableId)}/fields`;
   }
 
   private async tenantToken(): Promise<string> {

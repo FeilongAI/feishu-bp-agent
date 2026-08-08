@@ -21,6 +21,7 @@ Enable the Bot capability, add event `im.message.receive_v1`, and publish the ap
 im:message.p2p_msg:readonly
 im:message.group_at_msg:readonly
 im:message:send_as_bot
+contact:user.base:readonly
 ```
 
 The group permission name can vary slightly in the developer console. For the default `GROUP_REQUIRE_MENTION=true` behavior, choose the permission that allows receiving group messages that explicitly mention the Bot. Do not grant all group-message access unless the business requires it.
@@ -41,6 +42,8 @@ LARK_EVENT_KEY=im.message.receive_v1
 ```
 
 Leave `ALLOWED_USER_IDS`, `ALLOWED_CHAT_IDS`, and `ALLOWED_TENANT_KEYS` empty to avoid restricting those dimensions. Group messages still require `@Bot` by default. Never commit `.env` or print `FEISHU_APP_SECRET` and `INGRESS_API_KEY` in logs.
+
+The `contact:user.base:readonly` scope lets the forwarder resolve a sender's display name from the event `open_id`. If lookup fails, the message still proceeds with the `open_id`.
 
 ## 3. Docker deployment
 

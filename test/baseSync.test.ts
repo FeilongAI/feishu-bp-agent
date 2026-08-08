@@ -35,15 +35,15 @@ test("uses the official Base record API, tenant token cache, and client_token", 
   assert.match(token, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(outboxClientToken(42), token);
   assert.equal(calls.filter((call) => call.url.includes("tenant_access_token")).length, 1);
-  assert.equal(calls[1].url, `https://example.test/open-apis/bitable/v1/apps/bascn_token/tables/tbl_table/records?client_token=${token}`);
+  assert.equal(calls[1].url, `https://example.test/open-apis/base/v3/bases/bascn_token/tables/tbl_table/records?client_token=${token}`);
   assert.equal(calls[1].init?.method, "POST");
-  assert.equal(calls[2].init?.method, "PUT");
+  assert.equal(calls[2].init?.method, "PATCH");
   assert.equal(calls[3].init?.method, "DELETE");
   assert.equal((calls[1].init?.headers as Record<string, string>).authorization, "Bearer tenant-token");
-  const createBody = JSON.parse(String(calls[1].init?.body)) as { fields: Record<string, unknown> };
-  assert.equal(createBody.fields["需求ID"], requirement.id);
-  assert.deepEqual(createBody.fields["投放平台"], ["Meta"]);
-  assert.equal(createBody.fields["创建时间"], Date.parse(requirement.createdAt));
+  const createBody = JSON.parse(String(calls[1].init?.body)) as Record<string, unknown>;
+  assert.equal(createBody["需求ID"], requirement.id);
+  assert.deepEqual(createBody["投放平台"], ["Meta"]);
+  assert.equal(createBody["创建时间"], Date.parse(requirement.createdAt));
 });
 
 test("treats deleting an already absent Base record as success", async () => {

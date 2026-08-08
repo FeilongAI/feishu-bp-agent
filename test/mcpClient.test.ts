@@ -7,4 +7,8 @@ test("parses MCP tool allowlists and blocks mutating tools by default", () => {
   assert.equal(parseMcpToolAllowlist(""), undefined);
   assert.equal(isMcpMutationTool("bitable_v1_app_table_field_delete"), true);
   assert.equal(isMcpMutationTool("bitable_v1_app_table_record_search"), false);
+  assert.equal(isMcpMutationTool("rename-doc"), true);
+  assert.equal(isMcpMutationTool("set-doc-permission"), true);
+  assert.equal(isMcpMutationTool("unknown-tool"), true);
+  assert.equal(isMcpMutationTool("fetch-doc"), false);
 });

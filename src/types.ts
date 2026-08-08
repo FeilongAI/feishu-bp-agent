@@ -1,4 +1,7 @@
 export type DraftState = "collecting" | "awaiting_confirmation";
+export const MAX_MESSAGE_CONTENT_CHARS = 20_000;
+export const MAX_MESSAGE_IDENTIFIER_CHARS = 256;
+export const MAX_MESSAGE_NAME_CHARS = 200;
 export type RequirementStatus =
   | "待评估"
   | "已排期"

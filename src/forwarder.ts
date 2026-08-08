@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import type { Logger } from "./logger.ts";
 import { normalizeLarkEvent } from "./lark.ts";
-import type { BotReply, IncomingMessage } from "./types.ts";
+import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, type BotReply, type IncomingMessage } from "./types.ts";
 
 export interface CoreAgentConfig {
   url: string;
@@ -59,10 +59,10 @@ function spoolName(messageId: string): string {
 function isIncomingMessage(value: unknown): value is IncomingMessage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return typeof item.chatId === "string"
-    && typeof item.senderId === "string"
-    && typeof item.messageId === "string"
-    && typeof item.content === "string";
+  return typeof item.chatId === "string" && Boolean(item.chatId) && item.chatId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
+    && typeof item.senderId === "string" && Boolean(item.senderId) && item.senderId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
+    && typeof item.messageId === "string" && Boolean(item.messageId) && item.messageId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
+    && typeof item.content === "string" && Boolean(item.content.trim()) && item.content.length <= MAX_MESSAGE_CONTENT_CHARS;
 }
 
 export class CoreAgentHttpClient implements CoreAgent {
@@ -254,8 +254,26 @@ export class EventDeliveryService {
   async accept(rawEvent: Record<string, unknown>): Promise<boolean> {
     const message = normalizeLarkEvent(rawEvent);
     if (!message) return true;
+    return this.acceptMessage(message);
+  }
+
+  async acceptMessage(message: IncomingMessage): Promise<boolean> {
     const enriched = this.directory ? await this.directory.enrich(message).catch(() => message) : message;
-    await this.spool.save(enriched);
+    let saved = false;
+    for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
+      try {
+        await this.spool.save(enriched);
+        saved = true;
+        break;
+      } catch (error) {
+        if (attempt === this.config.maxRetries) {
+          this.logger.error("lark_event_spool_failed", { messageId: enriched.messageId, attempt: attempt + 1, error });
+          throw error;
+        }
+        await delay(Math.min(this.config.retryBaseMs * (2 ** attempt), 30_000));
+      }
+    }
+    if (!saved) return false;
     return this.deliver(enriched);
   }
 

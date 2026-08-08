@@ -4,7 +4,7 @@ import { authenticateRequest, type ApiAuthConfig, type ApiRole } from "./auth.ts
 import type { ConfirmationService } from "./confirmation.ts";
 import type { Logger } from "./logger.ts";
 import type { MessageProcessor } from "./messageProcessor.ts";
-import type { IncomingMessage, RequirementStore, RequirementStatus } from "./types.ts";
+import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage, type RequirementStore, type RequirementStatus } from "./types.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUIREMENT_STATUSES = new Set<RequirementStatus>(["待评估", "已排期", "进行中", "待验收", "已完成", "暂缓"]);
@@ -55,7 +55,10 @@ function normalizedMessage(body: Record<string, unknown>): IncomingMessage {
   const senderId = value("senderId", "sender_id");
   const messageId = value("messageId", "message_id");
   const content = body.content;
-  if (typeof chatId !== "string" || typeof senderId !== "string" || typeof messageId !== "string" || typeof content !== "string") {
+  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || typeof senderId !== "string" || !senderId || senderId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || typeof content !== "string" || !content.trim() || content.length > MAX_MESSAGE_CONTENT_CHARS) {
     throw new HttpError(400, "chatId, senderId, messageId and content are required");
   }
   const mentions = Array.isArray(body.mentions)
@@ -70,7 +73,7 @@ function normalizedMessage(body: Record<string, unknown>): IncomingMessage {
     content,
     chatType: value("chatType", "chat_type") === "group" ? "group" : "p2p",
     tenantKey: typeof value("tenantKey", "tenant_key") === "string" ? String(value("tenantKey", "tenant_key")) : undefined,
-    senderName: typeof value("senderName", "sender_name") === "string" ? String(value("senderName", "sender_name")) : undefined,
+    senderName: typeof value("senderName", "sender_name") === "string" && String(value("senderName", "sender_name")).length <= MAX_MESSAGE_NAME_CHARS ? String(value("senderName", "sender_name")) : undefined,
     senderType: value("senderType", "sender_type") === "bot" ? "bot" : "user",
     threadId: typeof value("threadId", "thread_id") === "string" ? String(value("threadId", "thread_id")) : undefined,
     mentions,
@@ -136,12 +139,17 @@ export function createHttpServer(processor: MessageProcessor, store: Requirement
       if (mutationMatch && (request.method === "PATCH" || request.method === "DELETE")) {
         const actorId = await requireAuth("admin");
         if (!actorId) return;
-        const id = decodeURIComponent(mutationMatch[1]);
+        let id: string;
+        try {
+          id = decodeURIComponent(mutationMatch[1]);
+        } catch {
+          throw new HttpError(400, "invalid_requirement_id");
+        }
         const body = request.method === "PATCH" ? validatePatch(await readJson(request)) : {};
         const action = request.method === "PATCH" ? "PATCH_REQUIREMENT" : "DELETE_REQUIREMENT";
         const confirmationHeader = request.headers["x-confirmation-token"];
         const confirmationToken = Array.isArray(confirmationHeader) ? confirmationHeader[0] : confirmationHeader;
-        if (!confirmationToken || !options.confirmation.verify(confirmationToken, { action, actorId, resourceId: id, body })) {
+        if (!confirmationToken || !options.confirmation.consume(confirmationToken, { action, actorId, resourceId: id, body })) {
           await store.recordAudit({ actorId, action, resourceId: id, payload: body, result: "denied" });
           return json(response, 409, { ok: false, error: "confirmation_required", requestId });
         }

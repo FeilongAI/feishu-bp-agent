@@ -61,6 +61,7 @@ export class ConversationService {
     if (this.isMcpConfirmation(text) && conversation.pendingMcpAction) {
       const pending = conversation.pendingMcpAction;
       if (pending.requestedById !== message.senderId) {
+        await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CONFIRM", resourceId: pending.toolName, result: "denied" }).catch(() => undefined);
         await this.store.saveConversation(conversation);
         return { text: "这项飞书操作只能由发起人确认。" };
       }
@@ -75,18 +76,34 @@ export class ConversationService {
       }
       const result = await this.config.mcp.callTool(pending.toolName, pending.argumentsJson).catch(() => ({ ok: false, error: "mcp_unavailable" }));
       if (this.mcpResultOk(result)) delete conversation.pendingMcpAction;
+      await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CONFIRM", resourceId: pending.toolName, result: this.mcpResultOk(result) ? "success" : "failed" }).catch(() => undefined);
       await this.store.saveConversation(conversation);
       return this.mcpResultOk(result)
         ? { text: `已执行飞书操作“${pending.toolName}”。${this.mcpResultText(result)}` }
         : { text: `飞书操作“${pending.toolName}”执行失败，未完成任何其他操作。请检查权限或稍后重试。` };
     }
     if (this.isMcpCancellation(text) && conversation.pendingMcpAction) {
+      if (conversation.pendingMcpAction.requestedById !== message.senderId) {
+        await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CANCEL", resourceId: conversation.pendingMcpAction.toolName, result: "denied" }).catch(() => undefined);
+        await this.store.saveConversation(conversation);
+        return { text: "这项飞书操作只能由发起人取消。" };
+      }
+      await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CANCEL", resourceId: conversation.pendingMcpAction.toolName, result: "success" }).catch(() => undefined);
       delete conversation.pendingMcpAction;
       await this.store.saveConversation(conversation);
       return { text: "已取消待确认的飞书操作。" };
     }
 
-    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && this.config.agent) {
+    const deterministicRequirementFlow = ruleCancel || ruleConfirmation
+      || analysis?.intent === "cancel_requirement" || analysis?.intent === "confirm_requirement";
+    const draftOwnedByOther = Boolean(conversation.draft && conversation.draft.requesterId !== message.senderId);
+    const mutatesDraft = deterministicRequirementFlow || (!ruleCurrentWork && !ruleMyRequirements && !adminQuery && !baseUrlQuery && !fieldDelete.requested && !fieldDeleteConfirmation);
+    if (draftOwnedByOther && mutatesDraft) {
+      await this.store.saveConversation(conversation);
+      return { text: "当前群聊中的需求草稿由其他成员发起，只有发起人可以补充、取消或确认提交。" };
+    }
+
+    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && !deterministicRequirementFlow && this.config.agent) {
       const runtime = createAgentToolRuntime({
         message,
         store: this.store,
@@ -99,11 +116,21 @@ export class ConversationService {
       const mcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
       runtime.definitions.push(...mcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name)));
       let mcpActionRequested = false;
+      let mcpActionDenied = false;
+      let agentToolFailed = false;
+      const markToolResult = (result: unknown): unknown => {
+        if (result && typeof result === "object" && (result as Record<string, unknown>).ok === false) agentToolFailed = true;
+        return result;
+      };
       const executor = {
         execute: async (name: string, argumentsJson: string) => {
           if (mcpTools.some((tool) => tool.function.name === name)) {
             if (isMcpMutationTool(name)) {
-              if (!conversation.pendingMcpAction) {
+              if (conversation.pendingMcpAction && conversation.pendingMcpAction.requestedById !== message.senderId) {
+                mcpActionDenied = true;
+                return { ok: false, error: "mcp_confirmation_owned_by_other" };
+              }
+              if (!conversation.pendingMcpAction || conversation.pendingMcpAction.requestedById === message.senderId) {
                 conversation.pendingMcpAction = {
                   toolName: name,
                   argumentsJson: argumentsJson.slice(0, 20_000),
@@ -117,9 +144,9 @@ export class ConversationService {
               const pending = conversation.pendingMcpAction;
               return { ok: false, confirmationRequired: true, toolName: pending?.toolName || name, expiresInMinutes: 10 };
             }
-            return this.config.mcp!.callTool(name, argumentsJson);
+            return markToolResult(await this.config.mcp!.callTool(name, argumentsJson));
           }
-          return runtime.executor.execute(name, argumentsJson);
+          return markToolResult(await runtime.executor.execute(name, argumentsJson));
         },
       };
       const agentResult = await this.config.agent.run({
@@ -132,6 +159,14 @@ export class ConversationService {
       if (mcpActionRequested && conversation.pendingMcpAction) {
         await this.store.saveConversation(conversation);
         return { text: `检测到需要执行飞书写操作“${conversation.pendingMcpAction.toolName}”。为避免误操作，请核对请求后回复“确认执行”；如不执行请回复“取消操作”。` };
+      }
+      if (mcpActionDenied) {
+        await this.store.saveConversation(conversation);
+        return { text: "当前有其他成员发起的飞书操作待确认，只有发起人可以确认或取消。" };
+      }
+      if (agentToolFailed) {
+        await this.store.saveConversation(conversation);
+        return { text: "工具调用未成功，我没有把这次操作当作已完成。请检查权限或参数后重试。" };
       }
       if (agentResult?.usedTools && agentResult.text) {
         await this.store.saveConversation(conversation);
@@ -169,9 +204,11 @@ export class ConversationService {
       try {
         await this.config.baseAdmin.deleteField(pending.fieldId);
         delete conversation.pendingBaseFieldDelete;
+        await this.store.recordAudit({ actorId: message.senderId, action: "DELETE_BASE_FIELD", resourceId: pending.fieldId, payload: { fieldName: pending.fieldName }, result: "success" }).catch(() => undefined);
         await this.store.saveConversation(conversation);
         return { text: `已删除${this.config.baseTableLabel || "多维表格"}中的列“${pending.fieldName}”。` };
       } catch (error) {
+        await this.store.recordAudit({ actorId: message.senderId, action: "DELETE_BASE_FIELD", resourceId: pending.fieldId, payload: { fieldName: pending.fieldName }, result: "failed" }).catch(() => undefined);
         await this.store.saveConversation(conversation);
         return { text: `删除列“${pending.fieldName}”失败，未完成任何其他操作。请检查 Base 权限或字段是否仍存在。` };
       }
@@ -179,6 +216,7 @@ export class ConversationService {
 
     if (fieldDelete.requested) {
       if (!this.isAdmin(message)) {
+        await this.store.recordAudit({ actorId: message.senderId, action: "DELETE_BASE_FIELD", result: "denied" }).catch(() => undefined);
         await this.store.saveConversation(conversation);
         return { text: `这项操作只有管理员${this.config.ownerName}可以执行。` };
       }

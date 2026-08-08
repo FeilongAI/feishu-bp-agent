@@ -81,6 +81,8 @@ test("issues scoped confirmation tokens and rejects tampering and expiry", () =>
   const input = { action: "PATCH_REQUIREMENT", actorId: "admin", resourceId: "REQ-1", body: { status: "进行中", progress: "50%" } };
   const issued = confirmation.issue(input, 1_000);
   assert.equal(confirmation.verify(issued.token, input, 2_000), true);
+  assert.equal(confirmation.consume(issued.token, input, 2_000), true);
+  assert.equal(confirmation.consume(issued.token, input, 2_000), false);
   assert.equal(confirmation.verify(issued.token, { ...input, body: { status: "已完成" } }, 2_000), false);
   assert.equal(confirmation.verify(`${issued.token.slice(0, -1)}x`, input, 2_000), false);
   assert.equal(confirmation.verify(issued.token, input, 62_000), false);
@@ -96,8 +98,8 @@ test("authenticates bearer and x-api-key values without accepting the other role
 });
 
 test("redacts nested secrets, bearer values, and URL passwords", () => {
-  assert.deepEqual(redact({ authorization: "Bearer abc", nested: { appSecret: "secret", note: "Bearer visible-token", url: "postgresql://user:password@db/app" } }), {
+  assert.deepEqual(redact({ authorization: "Bearer abc", nested: { appSecret: "secret", note: "Bearer visible-token", url: "postgresql://user:password@db/app?token=secret&x=1" } }), {
     authorization: "[REDACTED]",
-    nested: { appSecret: "[REDACTED]", note: "Bearer [REDACTED]", url: "postgresql://user:[REDACTED]@db/app" },
+    nested: { appSecret: "[REDACTED]", note: "Bearer [REDACTED]", url: "postgresql://user:[REDACTED]@db/app?token=[REDACTED]&x=1" },
   });
 });

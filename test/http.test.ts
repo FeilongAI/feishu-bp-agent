@@ -42,6 +42,11 @@ test("protects APIs and requires confirmation for requirement mutations", async 
   assert.equal((await request(server, { method: "GET", url: "/healthz" })).status, 200);
   assert.equal((await request(server, { method: "GET", url: "/api/requirements" })).status, 401);
   assert.equal((await request(server, { method: "POST", url: "/api/messages", body: {} })).status, 401);
+  const oversized = await request(server, {
+    method: "POST", url: "/api/messages", headers: { authorization: `Bearer ${ingressKey}` },
+    body: { chat_id: "oc_test", sender_id: "ou_user", message_id: "om_long", content: "x".repeat(20_001) },
+  });
+  assert.equal(oversized.status, 400);
 
   const requirement = await store.createRequirement({
     title: "测试需求", goal: "验证管理接口", scope: "API", acceptanceCriteria: "状态可更新", requesterId: "ou_user",

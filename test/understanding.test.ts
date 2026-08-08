@@ -181,3 +181,23 @@ test("runs an OpenAI-compatible tool call loop and returns the final answer", as
   assert.deepEqual((calls[0].body.tools as Array<Record<string, unknown>>).length, 1);
   assert.equal((calls[1].body.messages as Array<Record<string, unknown>>).at(-1)?.role, "tool");
 });
+
+test("keeps assistant and tool messages aligned when the model returns many calls", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const responses = [
+    { choices: [{ message: { content: null, tool_calls: Array.from({ length: 5 }, (_, index) => ({ id: `call_${index}`, type: "function", function: { name: "get_requirement_table_link", arguments: "{}" } })) } }] },
+    { choices: [{ message: { content: "已查询", tool_calls: [] } }] },
+  ];
+  const fakeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(responses.shift()), { status: 200 });
+  }) as typeof fetch;
+  const client = new OpenAICompatibleAgentClient({ baseUrl: "https://llm.example.test/v1", apiKey: "key", model: "model", maxRetries: 0 }, silentLogger, fakeFetch);
+  let executed = 0;
+  await client.run({ message: "查询", recentMessages: [], senderId: "ou_requester" }, [{ type: "function", function: { name: "get_requirement_table_link", description: "地址", parameters: { type: "object" } } }], {
+    async execute() { executed += 1; return { ok: true }; },
+  });
+  assert.equal(executed, 4);
+  const assistant = (calls[1].messages as Array<Record<string, unknown>>).find((item) => item.role === "assistant");
+  assert.equal((assistant?.tool_calls as unknown[]).length, 4);
+});

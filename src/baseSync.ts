@@ -25,7 +25,7 @@ export class BaseSyncWorker {
     this.store = store;
     this.client = client;
     this.logger = logger;
-    this.batchSize = options.batchSize ?? 20;
+    this.batchSize = Math.max(1, Math.min(options.batchSize ?? 20, 20));
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
   }
 

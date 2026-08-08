@@ -99,6 +99,21 @@ test("spools before delivery and replays after a transient failure", async () =>
   }
 });
 
+test("retries a transient spool write before consuming the event", async () => {
+  let saveCalls = 0;
+  const messages: IncomingMessage[] = [];
+  const spool: import("../src/forwarder.ts").SpoolStore = {
+    async save(message) { saveCalls += 1; if (saveCalls === 1) throw new Error("temporary disk error"); messages.push(message); },
+    async remove(messageId) { const index = messages.findIndex((item) => item.messageId === messageId); if (index >= 0) messages.splice(index, 1); },
+    async list() { return messages; },
+    async count() { return messages.length; },
+  };
+  const delivery = new EventDeliveryService(spool, { async process() { return { text: "已收到" }; } }, { async reply() {} }, silentLogger, { maxRetries: 1, retryBaseMs: 1 });
+  assert.equal(await delivery.accept(flatEvent), true);
+  assert.equal(saveCalls, 2);
+  assert.equal(messages.length, 0);
+});
+
 test("ignores bot events without creating spool items", async () => {
   const directory = await mkdtemp(join(tmpdir(), "bp-forwarder-"));
   try {

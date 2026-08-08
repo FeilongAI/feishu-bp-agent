@@ -1,6 +1,7 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 interface ConfirmationPayload {
+  id: string;
   action: string;
   actorId: string;
   bodyHash: string;
@@ -26,6 +27,7 @@ export function hashConfirmationBody(body: unknown): string {
 export class ConfirmationService {
   private readonly secret: string;
   private readonly ttlSeconds: number;
+  private readonly consumed = new Map<string, number>();
 
   constructor(secret: string, ttlSeconds = 300) {
     if (secret.length < 32) throw new Error("CONFIRMATION_SECRET must be at least 32 characters");
@@ -35,6 +37,7 @@ export class ConfirmationService {
 
   issue(input: { action: string; actorId: string; resourceId: string; body: unknown }, now = Date.now()): { token: string; expiresAt: string } {
     const payload: ConfirmationPayload = {
+      id: randomUUID(),
       action: input.action,
       actorId: input.actorId,
       bodyHash: hashConfirmationBody(input.body),
@@ -61,5 +64,12 @@ export class ConfirmationService {
     } catch {
       return false;
     }
+  }
+
+  consume(token: string, expected: { action: string; actorId: string; resourceId: string; body: unknown }, now = Date.now()): boolean {
+    for (const [key, expiresAt] of this.consumed) if (expiresAt < now) this.consumed.delete(key);
+    if (!this.verify(token, expected, now) || this.consumed.has(token)) return false;
+    this.consumed.set(token, now + this.ttlSeconds * 1000);
+    return true;
   }
 }

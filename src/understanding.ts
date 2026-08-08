@@ -322,7 +322,7 @@ export class OpenAICompatibleAgentClient implements AgentClient {
       if (!body) return undefined;
       const assistant = body.choices?.[0]?.message;
       if (!assistant || typeof assistant !== "object") return undefined;
-      const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls as ChatToolCall[] : [];
+      const toolCalls = Array.isArray(assistant.tool_calls) ? (assistant.tool_calls as ChatToolCall[]).slice(0, 4) : [];
       if (!toolCalls.length) {
         const text = typeof assistant.content === "string" ? assistant.content.trim() : "";
         return { text: text || undefined, usedTools };
@@ -379,7 +379,7 @@ export class OpenAICompatibleAgentClient implements AgentClient {
 
   private payload(input: AgentInput): Record<string, unknown> {
     const truncate = (value: string, maxLength: number) => value.slice(0, maxLength);
-    return {
+    const payload: Record<string, unknown> = {
       senderId: input.senderId,
       senderName: input.senderName || null,
       message: truncate(input.message, Math.floor(this.config.maxInputChars * 0.5)),
@@ -392,5 +392,22 @@ export class OpenAICompatibleAgentClient implements AgentClient {
         state: input.draft.state,
       } : null,
     };
+    const size = () => JSON.stringify(payload).length;
+    const recent = payload.recentMessages as string[];
+    while (recent.length && size() > this.config.maxInputChars) recent.shift();
+    if (payload.draft && typeof payload.draft === "object") {
+      const draft = payload.draft as Record<string, unknown>;
+      for (const key of ["acceptanceCriteria", "scope", "goal", "title"] as const) {
+        const value = draft[key];
+        if (typeof value !== "string") continue;
+        const overflow = Math.max(0, size() - this.config.maxInputChars);
+        if (overflow) draft[key] = value.slice(0, Math.max(20, value.length - overflow - 8));
+      }
+    }
+    if (size() > this.config.maxInputChars) {
+      const overflow = size() - this.config.maxInputChars;
+      payload.message = String(payload.message).slice(0, Math.max(40, String(payload.message).length - overflow - 8));
+    }
+    return payload;
   }
 }

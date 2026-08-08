@@ -109,7 +109,7 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   }
 
   async createRequirement(requirement: Requirement, clientToken: string): Promise<string> {
-    const data = await this.request("POST", `${this.recordsPath()}?client_token=${encodeURIComponent(clientToken)}`, { fields: this.requirementFields(requirement) });
+    const data = await this.request("POST", `${this.recordsPath()}?client_token=${encodeURIComponent(clientToken)}`, this.requirementFields(requirement));
     const record = this.asObject(data.record);
     const recordId = record.record_id ?? record.recordId ?? data.record_id;
     if (typeof recordId !== "string" || !recordId) throw new FeishuApiError("Feishu Base create response has no record_id", 502);
@@ -117,7 +117,7 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   }
 
   async updateRequirement(recordId: string, requirement: Requirement): Promise<void> {
-    await this.request("PUT", `${this.recordsPath()}/${encodeURIComponent(recordId)}`, { fields: this.requirementFields(requirement) });
+    await this.request("PATCH", `${this.recordsPath()}/${encodeURIComponent(recordId)}`, this.requirementFields(requirement));
   }
 
   async deleteRequirement(recordId: string): Promise<void> {
@@ -184,7 +184,7 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   }
 
   private recordsPath(): string {
-    return `/bitable/v1/apps/${encodeURIComponent(this.config.baseToken)}/tables/${encodeURIComponent(this.config.tableId)}/records`;
+    return `/base/v3/bases/${encodeURIComponent(this.config.baseToken)}/tables/${encodeURIComponent(this.config.tableId)}/records`;
   }
 
   private fieldsPath(): string {

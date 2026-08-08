@@ -5,6 +5,7 @@ import { ConversationService } from "./conversation.ts";
 import { FeishuBaseClient, parseBaseFieldMap } from "./feishuBase.ts";
 import { createHttpServer } from "./http.ts";
 import { LarkCliClient } from "./lark.ts";
+import { EventDeliveryService, FileSpoolStore } from "./forwarder.ts";
 import { logger } from "./logger.ts";
 import { MessageProcessor } from "./messageProcessor.ts";
 import { csvSet } from "./permissions.ts";
@@ -85,6 +86,9 @@ const mcp = process.env.MCP_ENABLED === "true"
     authToken: process.env.MCP_TAT || process.env.MCP_UAT,
     authType: process.env.MCP_TAT ? "tat" : process.env.MCP_UAT ? "uat" : undefined,
     allowedTools: parseMcpToolAllowlist(process.env.MCP_ALLOWED_TOOLS),
+    appId: process.env.FEISHU_APP_ID,
+    appSecret: process.env.FEISHU_APP_SECRET,
+    apiBaseUrl: process.env.FEISHU_API_BASE_URL,
     maxTools: Number(process.env.MCP_MAX_TOOLS || 80),
     timeoutMs: Number(process.env.MCP_TIMEOUT_MS || 15_000),
   }, logger)
@@ -126,10 +130,15 @@ server.listen(port, host, () => {
 
 if (process.env.RUN_LARK_CONSUMER === "true") {
   const lark = new LarkCliClient(logger);
-  lark.start(async (message) => {
-    const reply = await processor.process(message);
-    if (reply.text) await lark.reply(message.messageId, reply.text);
-  });
+  const delivery = new EventDeliveryService(
+    new FileSpoolStore(process.env.FORWARDER_SPOOL_DIR || "data/forwarder-spool"),
+    { process: (message) => processor.process(message) },
+    { reply: async (messageId, reply) => { if (reply.text) await lark.reply(messageId, reply.text); } },
+    logger,
+    { maxRetries: Number(process.env.FORWARDER_MAX_RETRIES || 5), retryBaseMs: Number(process.env.FORWARDER_RETRY_BASE_MS || 500) },
+  );
+  void delivery.replay();
+  lark.start(async (message) => { await delivery.acceptMessage(message); });
 }
 
 let shuttingDown = false;

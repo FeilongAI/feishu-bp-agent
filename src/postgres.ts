@@ -221,7 +221,7 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
         await client.query("COMMIT");
         return [];
       }
-      await client.query("UPDATE bp_base_worker_lease SET lock_token = $1, locked_until = NOW() + INTERVAL '10 minutes' WHERE id = 1", [lockToken]);
+      await client.query("UPDATE bp_base_worker_lease SET lock_token = $1, locked_until = NOW() + INTERVAL '30 minutes' WHERE id = 1", [lockToken]);
       const result = await client.query(
         `WITH candidates AS (
            SELECT item.id FROM bp_base_outbox AS item
@@ -233,7 +233,7 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
            ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $1
          )
          UPDATE bp_base_outbox AS item
-         SET attempts = item.attempts + 1, locked_until = NOW() + INTERVAL '10 minutes', lock_token = $2
+             SET attempts = item.attempts + 1, locked_until = NOW() + INTERVAL '30 minutes', lock_token = $2
          FROM candidates WHERE item.id = candidates.id
          RETURNING item.id, item.requirement_id, item.operation, item.payload, item.attempts, item.lock_token`,
         [Math.max(1, Math.min(limit, 100)), lockToken],

@@ -144,8 +144,39 @@ test("rejects MCP confirmation from another group member and supports cancellati
   await service.handleMessage(groupMessage("请创建一篇周报文档", "20", "ou_requester"));
   assert.equal((await service.handleMessage(groupMessage("确认执行", "21", "ou_other"))).text, "这项飞书操作只能由发起人确认。");
   assert.equal(mcp.calls, 0);
+  assert.equal((await service.handleMessage(groupMessage("取消操作", "21b", "ou_other"))).text, "这项飞书操作只能由发起人取消。");
   assert.equal((await service.handleMessage(groupMessage("取消操作", "22", "ou_requester"))).text, "已取消待确认的飞书操作。");
   assert.equal(mcp.calls, 0);
+});
+
+test("submits a confirmed requirement without invoking the agent", async () => {
+  const store = new InMemoryRequirementStore();
+  let agentCalls = 0;
+  const service = new ConversationService(store, {
+    ownerId: "ou_owner", ownerName: "韩飞龙",
+    agent: { async run() { agentCalls += 1; throw new Error("agent must not run for confirmation"); } },
+  });
+  await store.saveConversation({
+    key: "oc_demo:ou_requester:main", chatId: "oc_demo", senderId: "ou_requester", recentMessages: [], updatedAt: new Date().toISOString(),
+    draft: {
+      id: "DRAFT-1", conversationKey: "oc_demo:ou_requester:main", requesterId: "ou_requester", title: "Meta 看板",
+      goal: "核对消耗", scope: "游戏和国家", acceptanceCriteria: "看到 D0 ROAS", state: "awaiting_confirmation",
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    },
+  });
+  assert.match((await service.handleMessage(message("确认提交", "29"))).text, /已记录需求 REQ-/);
+  assert.equal(agentCalls, 0);
+});
+
+test("does not let another group member edit or submit a requirement draft", async () => {
+  const store = new InMemoryRequirementStore();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
+  const groupMessage = (content: string, id: string, senderId: string) => ({ ...message(content, id, senderId), chatType: "group" as const });
+  await service.handleMessage(groupMessage("我想做一个 Meta 看板", "25", "ou_requester"));
+  assert.match((await service.handleMessage(groupMessage("目标是核对消耗", "26", "ou_other"))).text, /只有发起人/);
+  assert.match((await service.handleMessage(groupMessage("确认提交", "27", "ou_other"))).text, /只有发起人/);
+  assert.equal((await store.listRequirements()).length, 0);
+  assert.match((await service.handleMessage(groupMessage("取消当前需求", "28", "ou_other"))).text, /只有发起人/);
 });
 
 test("expires an MCP confirmation without calling the remote tool", async () => {

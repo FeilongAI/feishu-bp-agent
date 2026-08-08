@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Logger } from "./logger.ts";
-import type { IncomingMessage } from "./types.ts";
+import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage } from "./types.ts";
 
 export interface LarkClient {
   start(onMessage: (message: IncomingMessage) => Promise<void> | void): ChildProcessWithoutNullStreams;
@@ -30,10 +30,16 @@ export function normalizeLarkEvent(input: Record<string, unknown>): IncomingMess
   const header = object(input.header);
   const senderType = String(sender.sender_type ?? envelope.sender_type ?? "user");
   if (senderType === "bot" || senderType === "app") return undefined;
+  const messageType = message.message_type ?? envelope.message_type;
+  if (typeof messageType === "string" && messageType !== "text") return undefined;
   const chatId = message.chat_id ?? envelope.chat_id;
   const messageId = message.message_id ?? envelope.message_id;
   const openId = senderId.open_id ?? envelope.sender_id;
-  if (typeof chatId !== "string" || typeof messageId !== "string" || typeof openId !== "string") return undefined;
+  const content = textContent(message.content ?? envelope.content);
+  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || typeof openId !== "string" || !openId || openId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+    || !content.trim() || content.length > MAX_MESSAGE_CONTENT_CHARS) return undefined;
   const mentions = Array.isArray(message.mentions)
     ? message.mentions.flatMap((item) => {
       const mention = object(item);
@@ -46,9 +52,9 @@ export function normalizeLarkEvent(input: Record<string, unknown>): IncomingMess
     chatType: message.chat_type === "group" ? "group" : "p2p",
     tenantKey: typeof header.tenant_key === "string" ? header.tenant_key : undefined,
     senderId: openId,
-    senderName: typeof sender.sender_name === "string" ? sender.sender_name : undefined,
+    senderName: typeof sender.sender_name === "string" && sender.sender_name.length <= MAX_MESSAGE_NAME_CHARS ? sender.sender_name : undefined,
     messageId,
-    content: textContent(message.content ?? envelope.content),
+    content,
     senderType: "user",
     threadId: typeof message.thread_id === "string" ? message.thread_id : typeof message.root_id === "string" ? message.root_id : undefined,
     mentions,

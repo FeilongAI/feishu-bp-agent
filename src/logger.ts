@@ -1,10 +1,11 @@
 const SENSITIVE_KEY = /(authorization|cookie|password|secret|token|api[-_]?key|credential|database_url)/i;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const URL_PASSWORD = /(\w+:\/\/[^:\s/]+:)[^@\s/]+(@)/g;
+const URL_QUERY_SECRET = /([?&](?:access_token|api[-_]?key|token|secret|password|credential)=)[^&#\s]*/gi;
 
 export function redact(value: unknown, key = ""): unknown {
   if (SENSITIVE_KEY.test(key)) return "[REDACTED]";
-  if (typeof value === "string") return value.replace(BEARER, "Bearer [REDACTED]").replace(URL_PASSWORD, "$1[REDACTED]$2");
+  if (typeof value === "string") return value.replace(BEARER, "Bearer [REDACTED]").replace(URL_PASSWORD, "$1[REDACTED]$2").replace(URL_QUERY_SECRET, "$1[REDACTED]");
   if (Array.isArray(value)) return value.map((item) => redact(item));
   if (value && typeof value === "object") {
     if (value instanceof Error) return { name: value.name, message: redact(value.message), stack: redact(value.stack) };

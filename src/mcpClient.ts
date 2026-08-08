@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createHash } from "node:crypto";
 import type { Logger } from "./logger.ts";
 import type { AgentToolDefinition } from "./understanding.ts";
 
@@ -9,6 +10,9 @@ export interface McpClientConfig {
   authToken?: string;
   authType?: "uat" | "tat";
   allowedTools?: Set<string>;
+  appId?: string;
+  appSecret?: string;
+  apiBaseUrl?: string;
   maxTools?: number;
   timeoutMs?: number;
 }
@@ -26,15 +30,22 @@ interface McpToolShape {
 }
 
 export function isMcpMutationTool(name: string): boolean {
-  return /(?:^|[-_.])(?:create|delete|update|patch|batch[_-]?(?:create|delete|update)|send|move|copy|upload|remove|clear|add)(?:[-_.]|$)/i.test(name);
+  const normalized = name.toLowerCase();
+  const mutation = /(?:^|[-_.])(?:create|delete|update|patch|write|modify|set|rename|grant|revoke|publish|archive|append|insert|replace|upsert|send|move|copy|upload|remove|clear|add|batch|subscribe|unsubscribe|invite|permission)(?:[-_.]|$)/i.test(normalized);
+  if (mutation) return true;
+  // Unknown tools are held for confirmation. Only names that clearly describe
+  // a read/query operation are safe to execute without approval.
+  return !/(?:^|[-_.])(?:get|list|search|fetch|find|query|read|describe|check|view|retrieve|download|export|lookup)(?:[-_.]|$)/i.test(normalized);
 }
 
 export class LarkMcpClient implements McpToolProvider {
-  private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools">;
+  private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">;
   private readonly logger: Logger;
   private client?: Client;
   private transport?: StreamableHTTPClientTransport;
   private tools?: AgentToolDefinition[];
+  private readonly exposedToRemoteName = new Map<string, string>();
+  private authTokenExpiresAt = 0;
   private connecting?: Promise<void>;
 
   constructor(config: McpClientConfig, logger: Logger) {
@@ -45,6 +56,9 @@ export class LarkMcpClient implements McpToolProvider {
       authToken: config.authToken,
       authType: config.authType,
       allowedTools: config.allowedTools,
+      appId: config.appId,
+      appSecret: config.appSecret,
+      apiBaseUrl: config.apiBaseUrl || "https://open.feishu.cn/open-apis",
       maxTools: Number.isFinite(config.maxTools) ? Math.max(1, Math.min(Math.trunc(config.maxTools!), 200)) : 80,
       timeoutMs: Number.isFinite(config.timeoutMs) ? Math.max(500, Math.min(Math.trunc(config.timeoutMs!), 60_000)) : 15_000,
     };
@@ -54,7 +68,10 @@ export class LarkMcpClient implements McpToolProvider {
   async listTools(): Promise<AgentToolDefinition[]> {
     await this.ensureConnected();
     if (this.tools) return this.tools;
-    const result = await this.client!.listTools();
+    const result = await this.client!.listTools().catch(async (error) => {
+      await this.close();
+      throw error;
+    });
     const allowed = this.config.toolAllowlist;
     this.tools = result.tools
       .filter((tool) => typeof tool.name === "string" && (!allowed || allowed.has(tool.name)))
@@ -68,13 +85,19 @@ export class LarkMcpClient implements McpToolProvider {
     if (!tools.some((tool) => tool.function.name === name)) return { ok: false, error: "mcp_tool_not_allowlisted" };
     let args: unknown = {};
     try { args = JSON.parse(argumentsJson || "{}"); } catch { return { ok: false, error: "invalid_tool_arguments" }; }
-    const result = await this.client!.callTool({ name, arguments: args as Record<string, unknown> });
-    return {
-      ok: result.isError !== true,
-      content: result.content,
-      structuredContent: result.structuredContent,
-      ...(result.isError === true ? { error: "mcp_tool_failed" } : {}),
-    };
+    try {
+      const remoteName = this.exposedToRemoteName.get(name) ?? name;
+      const result = await this.client!.callTool({ name: remoteName, arguments: args as Record<string, unknown> });
+      return {
+        ok: result.isError !== true,
+        content: result.content,
+        structuredContent: result.structuredContent,
+        ...(result.isError === true ? { error: "mcp_tool_failed" } : {}),
+      };
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -82,6 +105,7 @@ export class LarkMcpClient implements McpToolProvider {
     this.transport = undefined;
     this.client = undefined;
     this.tools = undefined;
+    this.exposedToRemoteName.clear();
   }
 
   private async ensureConnected(): Promise<void> {
@@ -92,7 +116,8 @@ export class LarkMcpClient implements McpToolProvider {
       const transport = new StreamableHTTPClientTransport(new URL(this.config.url), {
         fetch: async (url, init) => {
           const headers = new Headers(init?.headers);
-          if (this.config.authToken && this.config.authType) headers.set(`X-Lark-MCP-${this.config.authType.toUpperCase()}`, this.config.authToken);
+          const authToken = await this.authToken();
+          if (authToken && this.config.authType) headers.set(`X-Lark-MCP-${this.config.authType.toUpperCase()}`, authToken);
           if (this.config.allowedTools?.size) headers.set("X-Lark-MCP-Allowed-Tools", [...this.config.allowedTools].join(","));
           return fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.config.timeoutMs) });
         },
@@ -113,13 +138,35 @@ export class LarkMcpClient implements McpToolProvider {
     }
   }
 
+  private async authToken(): Promise<string | undefined> {
+    if (this.config.authType !== "tat" || !this.config.appId || !this.config.appSecret) return this.config.authToken;
+    if (this.config.authToken && this.authTokenExpiresAt > Date.now() + 60_000) return this.config.authToken;
+    const response = await fetch(`${this.config.apiBaseUrl}/auth/v3/tenant_access_token/internal`, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ app_id: this.config.appId, app_secret: this.config.appSecret }),
+      signal: AbortSignal.timeout(this.config.timeoutMs),
+    });
+    const payload = await response.json() as { code?: unknown; tenant_access_token?: unknown; expire?: unknown; msg?: unknown };
+    if (!response.ok || payload.code !== 0 || typeof payload.tenant_access_token !== "string") {
+      throw new Error(typeof payload.msg === "string" ? payload.msg : "tenant_access_token_unavailable");
+    }
+    this.config.authToken = payload.tenant_access_token;
+    this.authTokenExpiresAt = Date.now() + (typeof payload.expire === "number" ? payload.expire : 7200) * 1000;
+    return this.config.authToken;
+  }
+
   private toAgentDefinition(tool: McpToolShape): AgentToolDefinition {
     const name = String(tool.name);
     const description = typeof tool.description === "string" && tool.description.trim() ? tool.description : `调用飞书工具 ${name}`;
     const parameters = tool.inputSchema && typeof tool.inputSchema === "object" && !Array.isArray(tool.inputSchema)
       ? tool.inputSchema as Record<string, unknown>
       : { type: "object", properties: {} };
-    return { type: "function", function: { name: name.slice(0, 64), description: description.slice(0, 800), parameters } };
+    const exposedName = name.length <= 64
+      ? name
+      : `${name.slice(0, 55)}_${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
+    this.exposedToRemoteName.set(exposedName, name);
+    return { type: "function", function: { name: exposedName, description: description.slice(0, 800), parameters } };
   }
 }
 

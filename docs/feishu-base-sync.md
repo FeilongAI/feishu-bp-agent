@@ -27,7 +27,7 @@ FEISHU_BASE_TABLE_LABEL=需求表
 
 `OWNER_OPEN_ID` is the only administrator allowlist entry. A field deletion request from any other sender is rejected. The agent first lists fields, refuses to delete the primary field, shows the exact field name and ID, and only deletes after the administrator replies `确认删除` within 10 minutes. The pending confirmation is stored in PostgreSQL, so `DATABASE_URL` is required when this feature is enabled.
 
-The adapter uses the official `bitable/v1` record APIs with `tenant_access_token`. It does not use a developer laptop's `lark-cli` session or macOS Keychain.
+The adapter uses the official `base/v3` record and field APIs with `tenant_access_token`. It does not use a developer laptop's `lark-cli` session or macOS Keychain.
 
 The default field names and recommended field types are:
 

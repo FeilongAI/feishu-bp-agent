@@ -23,9 +23,7 @@ export function authorizeMessage(message: IncomingMessage, config: PermissionCon
   if (config.allowedUserIds.size && !config.allowedUserIds.has(message.senderId)) return { allowed: false, reason: "user_denied" };
   if (config.allowedChatIds.size && !config.allowedChatIds.has(message.chatId)) return { allowed: false, reason: "chat_denied" };
   if (message.chatType === "group" && config.groupRequireMention) {
-    const mentioned = config.botOpenId
-      ? message.mentions?.some((mention) => mention.id === config.botOpenId)
-      : Boolean(message.mentions?.length);
+    const mentioned = Boolean(config.botOpenId) && message.mentions?.some((mention) => mention.id === config.botOpenId);
     if (!mentioned) return { allowed: false, reason: "bot_mention_required", silent: true };
   }
   return { allowed: true };

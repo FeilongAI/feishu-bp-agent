@@ -4,7 +4,16 @@ import { createAgentToolRuntime } from "./agentTools.ts";
 import { isMcpMutationTool, type McpToolProvider } from "./mcpClient.ts";
 import type { AgentClient, ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 
-const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdMob", "Pangle", "Mintegral"];
+const PLATFORM_ALIASES: Record<string, string[]> = {
+  TikTok: ["tiktok", "tiktok ads"],
+  Meta: ["meta", "facebook", "fb ads"],
+  Unity: ["unity", "unity ads"],
+  AppsFlyer: ["appsflyer", "app flyer", "appflyer"],
+  AppLovin: ["applovin", "app lovin"],
+  AdMob: ["admob", "ad mob"],
+  Pangle: ["pangle"],
+  Mintegral: ["mintegral", "mintegral ads"],
+};
 
 export interface ConversationConfig {
   ownerId: string;
@@ -41,11 +50,12 @@ export class ConversationService {
     const ruleMyRequirements = this.isMyRequirementsQuery(text);
     const ruleCancel = /^(取消|放弃|清空)(当前)?需求/.test(text);
     const ruleConfirmation = /^(确认|确认提交|提交|是的|可以提交)$/.test(text);
+    const ruleNewRequirement = this.isNewRequirementRequest(text);
     const adminQuery = this.isAdminQuery(text);
     const baseUrlQuery = this.isBaseUrlQuery(text);
     const fieldDelete = this.parseFieldDeleteRequest(text);
     const fieldDeleteConfirmation = this.isFieldDeleteConfirmation(text);
-    const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation
+    const analysis = ruleCurrentWork || ruleMyRequirements || ruleCancel || ruleConfirmation || ruleNewRequirement
       || adminQuery || baseUrlQuery || fieldDelete.requested || fieldDeleteConfirmation
       ? undefined
       : await this.analyze({
@@ -109,7 +119,7 @@ export class ConversationService {
       return { text: "当前群聊中的需求草稿由其他成员发起，只有发起人可以补充、取消或确认提交。" };
     }
 
-    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && !deterministicRequirementFlow && this.config.agent) {
+    if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && !deterministicRequirementFlow && !ruleNewRequirement && this.config.agent) {
       const runtime = createAgentToolRuntime({
         message,
         store: this.store,
@@ -285,7 +295,7 @@ export class ConversationService {
       await this.store.saveConversation(conversation);
       return { text: "已清空当前需求草稿。需要提交新需求时，直接告诉我想解决什么问题即可。" };
     }
-    const startsRequirement = analysis?.intent === "new_requirement" || /^(新需求|提需求|需求)[:：]?/.test(text);
+    const startsRequirement = analysis?.intent === "new_requirement" || ruleNewRequirement || /^(新需求|提需求|需求)[:：]?/.test(text);
     if (startsRequirement && conversation.draft) {
       delete conversation.draft;
     }
@@ -344,7 +354,17 @@ export class ConversationService {
   }
 
   private isBaseUrlQuery(text: string): boolean {
-    return /(?:需求|多维表格|多维表|Base|bitable|表格).*(?:地址|链接|URL|url)|(?:地址|链接|URL|url).*(?:需求|多维表格|多维表|Base|bitable|表格)/i.test(text);
+    if (this.isNewRequirementRequest(text)) return false;
+    const hasResource = /(?:需求|多维表格|多维表|Base|bitable|表格)/i.test(text);
+    const hasAddress = /(?:地址|链接|URL)/i.test(text);
+    const asksForIt = /(?:是什么|在哪|给我|发我|查询|查看|告诉|提供|找一下|找下)/i.test(text);
+    return hasResource && hasAddress && asksForIt;
+  }
+
+  private isNewRequirementRequest(text: string): boolean {
+    return /^(?:接下来\s*)?(?:新增|新建|创建|提出|发起)\s*(?:一个|一项)?\s*需求(?:$|[\s:：，,])/i.test(text)
+      || /^(?:请|帮我|麻烦)?\s*(?:记录|登记|记下|记一下)\s*(?:一个|一项)?\s*(?:新)?需求(?:$|[\s:：，,])/i.test(text)
+      || /(?:帮我|请帮我|麻烦帮我)\s*(?:记录|记下|记一下)\b.*(?:需求|事项|任务)/i.test(text);
   }
 
   private isFieldDeleteConfirmation(text: string): boolean {
@@ -385,17 +405,28 @@ export class ConversationService {
   }
 
   private createDraft(message: IncomingMessage, key: string, firstMessage: string): RequirementDraft {
-    const title = firstMessage.replace(/^(新需求|提需求|需求)[:：]?\s*/i, "").slice(0, 80) || "未命名需求";
+    const title = this.requirementTitle(firstMessage);
     const draft: RequirementDraft = { id: `DRAFT-${Date.now()}`, conversationKey: key, requesterId: message.senderId, requesterName: message.senderName, title, state: "collecting", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     this.fillDraft(draft, firstMessage);
     return draft;
+  }
+
+  private requirementTitle(text: string): string {
+    const title = text.trim()
+      .replace(/^(?:接下来\s*)?(?:新增|新建|创建|提出|发起)\s*(?:一个|一项)?\s*需求\s*[:：，,]?\s*/i, "")
+      .replace(/^(?:新需求|提需求|需求)\s*[:：，,]?\s*/i, "")
+      .replace(/[，,\s]*(?:请|帮我|麻烦)?\s*(?:记录|记下|记一下|登记)(?:一下)?\s*$/i, "")
+      .trim();
+    return title.slice(0, 80) || "未命名需求";
   }
 
   private fillDraft(draft: RequirementDraft, text: string): void {
     const lower = text.toLowerCase();
     if (!draft.goal && /(目标|目的|为了|希望|解决)/.test(text)) draft.goal = text;
     if (!draft.scope && /(范围|包含|需要|按|维度|平台|看板|数据)/.test(text) && text !== draft.title) draft.scope = text;
-    const platforms = PLATFORM_NAMES.filter((name) => lower.includes(name.toLowerCase()));
+    const platforms = Object.entries(PLATFORM_ALIASES)
+      .filter(([, aliases]) => aliases.some((alias) => lower.includes(alias)))
+      .map(([name]) => name);
     if (platforms.length) draft.platforms = [...new Set([...(draft.platforms ?? []), ...platforms])];
     if (!draft.acceptanceCriteria && /(验收|结果|输出|完成后|需要看到)/.test(text)) draft.acceptanceCriteria = text;
     const date = text.match(/(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}|本周[一二三四五六日天]|下周[一二三四五六日天]|月底|下月底)/);
@@ -417,7 +448,7 @@ export class ConversationService {
   }
 
   private nextDraftReply(draft: RequirementDraft, analysis?: MessageUnderstanding): string {
-    if (!draft.goal) return analysis?.nextQuestion || "为了把需求记录准确，先告诉我：这个需求主要想解决什么问题，或希望达成什么结果？";
+    if (!draft.goal) return analysis?.nextQuestion || `我先记下需求“${draft.title}”。为了把需求记录准确，请告诉我：这个需求主要想解决什么问题，或希望达成什么结果？`;
     if (!draft.scope) return analysis?.nextQuestion || "还需要明确范围：涉及哪些平台、游戏、数据指标或看板模块？";
     if (!draft.acceptanceCriteria) return analysis?.nextQuestion || "最后确认验收标准：做到什么程度，你会认为这个需求已经完成？";
     draft.state = "awaiting_confirmation";

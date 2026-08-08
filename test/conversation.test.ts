@@ -27,6 +27,25 @@ test("answers current work and requester requirements", async () => {
   assert.match((await service.handleMessage(message("我的需求", "7"))).text, /APP 营收核对/);
 });
 
+test("treats a concise new requirement as a draft and normalizes AppsFlyer aliases", async () => {
+  const store = new InMemoryRequirementStore();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
+  const reply = await service.handleMessage(message("接下来新增一个需求，appflyer push 地址更换，帮我记一下", "6b"));
+  assert.match(reply.text, /我先记下需求/);
+  assert.match(reply.text, /appflyer push 地址更换/);
+  assert.match(reply.text, /解决什么问题/);
+  const state = await store.getConversation("oc_demo:ou_requester:main");
+  assert.deepEqual(state?.draft?.platforms, ["AppsFlyer"]);
+});
+
+test("does not confuse a new requirement containing 地址 with the Base link query", async () => {
+  const store = new InMemoryRequirementStore();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", baseUrl: "https://feishu.cn/base/demo" });
+  const reply = await service.handleMessage(message("新增需求：替换 AppsFlyer push 地址", "6c"));
+  assert.match(reply.text, /我先记下需求/);
+  assert.doesNotMatch(reply.text, /多维表格地址/);
+});
+
 test("does not echo bot messages", async () => {
   const store = new InMemoryRequirementStore();
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });

@@ -47,6 +47,10 @@ export function exposedMcpToolName(remoteName: string, usedNames = new Map<strin
   return exposed;
 }
 
+export function isMcpToolAllowed(remoteName: string, allowlist?: Set<string>): boolean {
+  return !allowlist || allowlist.has(remoteName) || allowlist.has(exposedMcpToolName(remoteName));
+}
+
 export class LarkMcpClient implements McpToolProvider {
   private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">;
   private readonly logger: Logger;
@@ -83,7 +87,7 @@ export class LarkMcpClient implements McpToolProvider {
     });
     const allowed = this.config.toolAllowlist;
     this.tools = result.tools
-      .filter((tool) => typeof tool.name === "string" && (!allowed || allowed.has(tool.name)))
+      .filter((tool) => typeof tool.name === "string" && isMcpToolAllowed(tool.name, allowed))
       .slice(0, this.config.maxTools)
       .map((tool) => this.toAgentDefinition(tool as McpToolShape));
     return this.tools;
@@ -97,6 +101,7 @@ export class LarkMcpClient implements McpToolProvider {
     try {
       const remoteName = this.exposedToRemoteName.get(name) ?? name;
       const result = await this.client!.callTool({ name: remoteName, arguments: args as Record<string, unknown> });
+      if (result.isError === true) this.logger.warn("mcp_tool_failed", { tool: name, reason: "remote_tool_error" });
       return {
         ok: result.isError !== true,
         content: result.content,
@@ -104,6 +109,7 @@ export class LarkMcpClient implements McpToolProvider {
         ...(result.isError === true ? { error: "mcp_tool_failed" } : {}),
       };
     } catch (error) {
+      this.logger.warn("mcp_tool_call_failed", { tool: name, reason: error instanceof Error ? error.name : "unknown" });
       await this.close();
       throw error;
     }

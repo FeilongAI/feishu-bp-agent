@@ -140,7 +140,7 @@ export class ConversationService {
       let mcpActionConflict = false;
       let agentToolFailed = false;
       const markToolResult = (result: unknown): unknown => {
-        if (result && typeof result === "object" && (result as Record<string, unknown>).ok === false) agentToolFailed = true;
+        if (!result || typeof result !== "object" || (result as Record<string, unknown>).ok !== true) agentToolFailed = true;
         return result;
       };
       const executor = {
@@ -170,9 +170,17 @@ export class ConversationService {
               const pending = conversation.pendingMcpAction;
               return { ok: false, confirmationRequired: true, toolName: pending?.toolName || name, expiresInMinutes: 10 };
             }
-            return markToolResult(await this.config.mcp!.callTool(name, argumentsJson));
+            try {
+              return markToolResult(await this.config.mcp!.callTool(name, argumentsJson));
+            } catch {
+              return markToolResult({ ok: false, error: "mcp_unavailable" });
+            }
           }
-          return markToolResult(await runtime.executor.execute(name, argumentsJson));
+          try {
+            return markToolResult(await runtime.executor.execute(name, argumentsJson));
+          } catch {
+            return markToolResult({ ok: false, error: "tool_unavailable" });
+          }
         },
       };
       const agentResult = await this.config.agent.run({

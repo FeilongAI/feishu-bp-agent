@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exposedMcpToolName, isMcpMutationTool, parseMcpToolAllowlist } from "../src/mcpClient.ts";
+import { exposedMcpToolName, isMcpMutationTool, isMcpToolAllowed, parseMcpToolAllowlist } from "../src/mcpClient.ts";
 
 test("parses MCP tool allowlists and blocks mutating tools by default", () => {
   assert.deepEqual(parseMcpToolAllowlist("bitable_v1_app_get, bitable_v1_app_table_list"), new Set(["bitable_v1_app_get", "bitable_v1_app_table_list"]));
@@ -21,4 +21,10 @@ test("normalizes remote MCP names and keeps collisions distinct", () => {
   assert.match(dotted, /^[A-Za-z0-9_-]{1,64}$/);
   assert.match(underscored, /^[A-Za-z0-9_-]{1,64}$/);
   assert.notEqual(dotted, underscored);
+});
+
+test("accepts both remote and exposed names in the MCP allowlist", () => {
+  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["bitable.v1.appTableRecord.search"])), true);
+  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["bitable_v1_appTableRecord_search"])), true);
+  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["docx_v1_document_get"])), false);
 });

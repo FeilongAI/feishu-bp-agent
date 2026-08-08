@@ -68,6 +68,25 @@ test("lets the agent own requirement conversation and persistence through tools"
   assert.equal((await store.listRequirements()).length, 1);
 });
 
+test("does not trust the agent when a Feishu Base tool fails", async () => {
+  const store = new InMemoryRequirementStore();
+  const mcp = {
+    async listTools() {
+      return [{ type: "function" as const, function: { name: "bitable_v1_appTableRecord_search", description: "查询 Base 记录", parameters: { type: "object", properties: {} } } }];
+    },
+    async callTool() { return { ok: false, error: "permission_denied" }; },
+    async close() {},
+  };
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      await executor.execute("bitable_v1_appTableRecord_search", "{}");
+      return { usedTools: true, text: "已成功查询多维表格。" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
+  assert.equal((await service.handleMessage(message("查询多维表格记录", "6f"))).text, "工具调用未成功，我没有把这次操作当作已完成。请检查权限或参数后重试。");
+});
+
 test("does not echo bot messages", async () => {
   const store = new InMemoryRequirementStore();
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });

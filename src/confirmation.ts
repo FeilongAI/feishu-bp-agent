@@ -9,6 +9,10 @@ interface ConfirmationPayload {
   resourceId: string;
 }
 
+export interface ConfirmationClaimStore {
+  consumeConfirmation(jti: string, expiresAt: Date): Promise<boolean>;
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -52,6 +56,9 @@ export class ConfirmationService {
     const [encoded, signature, extra] = token.split(".");
     if (!encoded || !signature || extra) return false;
     const actual = Buffer.from(signature, "base64url");
+    // Buffer.from is deliberately permissive (it ignores invalid trailing bits),
+    // so require the exact canonical representation before comparing the MAC.
+    if (actual.toString("base64url") !== signature) return false;
     const wanted = sign(encoded, this.secret);
     if (actual.length !== wanted.length || !timingSafeEqual(actual, wanted)) return false;
     try {
@@ -61,6 +68,18 @@ export class ConfirmationService {
         && payload.actorId === expected.actorId
         && payload.resourceId === expected.resourceId
         && payload.bodyHash === hashConfirmationBody(expected.body);
+    } catch {
+      return false;
+    }
+  }
+
+  async consumePersistent(token: string, expected: { action: string; actorId: string; resourceId: string; body: unknown }, store: ConfirmationClaimStore, now = Date.now()): Promise<boolean> {
+    if (!this.verify(token, expected, now)) return false;
+    const encoded = token.split(".", 1)[0];
+    try {
+      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as ConfirmationPayload;
+      if (typeof payload.id !== "string" || !payload.id || !Number.isFinite(payload.expiresAt)) return false;
+      return await store.consumeConfirmation(payload.id, new Date(payload.expiresAt));
     } catch {
       return false;
     }

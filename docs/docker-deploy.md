@@ -15,6 +15,7 @@ Replace every `change_me` / `replace_with` value. At minimum configure:
 DATABASE_URL=postgresql://feishu_bp_agent:url_safe_password@database-host:5432/feishu_bp_agent
 ADMIN_API_KEY=a_random_value_with_at_least_24_characters
 INGRESS_API_KEY=a_different_random_value_with_24_characters
+INGRESS_EVENT_SECRET=a_different_random_value_with_at_least_32_characters
 CONFIRMATION_SECRET=a_random_value_with_at_least_32_characters
 OWNER_OPEN_ID=ou_your_open_id
 BOT_OPEN_ID=ou_your_bot_open_id
@@ -68,6 +69,8 @@ docker compose --profile mcp build
 docker compose --profile mcp up -d
 ```
 
+The MCP profile is optional and does not participate in normal Compose interpolation. When it is enabled, set `FEISHU_APP_ID` and `FEISHU_APP_SECRET`; the MCP image validates them when it starts. The container runs as the unprivileged `app` user.
+
 The local profile exposes only the tools named by `MCP_LARK_TOOLS`; the core client applies a second `MCP_TOOL_ALLOWLIST` filter. Any MCP tool whose name indicates a mutation is held for application-level confirmation before execution. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
 
 ## 2. Build and run against an existing PostgreSQL
@@ -112,6 +115,7 @@ curl http://127.0.0.1:8090/api/requirements \
 ```
 
 Only `/healthz` is public. Place the service behind TLS and restrict `/api/messages` to the trusted event forwarder even though it also requires `INGRESS_API_KEY`.
+In production the forwarder must also sign the exact JSON request body with `INGRESS_EVENT_SECRET`; keep the same value in the core and forwarder environments. Requests without a valid `x-ingress-signature: sha256=<hex>` are rejected before parsing.
 
 ## Lark message gateway
 

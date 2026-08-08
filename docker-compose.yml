@@ -87,8 +87,8 @@ services:
     env_file:
       - .env
     environment:
-      APP_ID: ${FEISHU_APP_ID:?set FEISHU_APP_ID in .env}
-      APP_SECRET: ${FEISHU_APP_SECRET:?set FEISHU_APP_SECRET in .env}
+      APP_ID: ${FEISHU_APP_ID:-}
+      APP_SECRET: ${FEISHU_APP_SECRET:-}
       LARK_DOMAIN: ${LARK_DOMAIN:-https://open.feishu.cn}
       LARK_TOKEN_MODE: ${LARK_TOKEN_MODE:-tenant_access_token}
       LARK_TOOLS: ${MCP_LARK_TOOLS:-bitable.v1.app.get,bitable.v1.appTable.list,bitable.v1.appTableField.list,bitable.v1.appTableField.delete,bitable.v1.appTableRecord.list,bitable.v1.appTableRecord.search,docx.v1.document.rawContent.get,im.v1.message.list,contact.v3.user.get}

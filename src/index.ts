@@ -5,7 +5,7 @@ import { ConversationService } from "./conversation.ts";
 import { FeishuBaseClient, parseBaseFieldMap } from "./feishuBase.ts";
 import { createHttpServer } from "./http.ts";
 import { LarkCliClient } from "./lark.ts";
-import { EventDeliveryService, FileSpoolStore } from "./forwarder.ts";
+import { EventDeliveryService, FileSpoolStore, LarkCliReplySender, LarkCliSenderDirectory } from "./forwarder.ts";
 import { logger } from "./logger.ts";
 import { MessageProcessor } from "./messageProcessor.ts";
 import { csvSet } from "./permissions.ts";
@@ -28,6 +28,7 @@ if (process.env.NODE_ENV === "production") {
     DATABASE_URL: process.env.DATABASE_URL || "",
     ...(process.env.BASE_SYNC_ENABLED === "true" || process.env.BASE_ADMIN_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
     ...(process.env.LLM_ENABLED === "true" ? { LLM_API_KEY: process.env.LLM_API_KEY || "" } : {}),
+    ...(process.env.NODE_ENV === "production" ? { INGRESS_EVENT_SECRET: process.env.INGRESS_EVENT_SECRET || "" } : {}),
   };
   const invalid = Object.entries(productionSecrets)
     .filter(([, value]) => !value || /change_me|replace_with/i.test(value))
@@ -110,15 +111,15 @@ const processor = new MessageProcessor(store, service, {
   botOpenId: process.env.BOT_OPEN_ID,
 }, logger);
 const confirmation = new ConfirmationService(process.env.CONFIRMATION_SECRET || "");
-const server = createHttpServer(processor, store, { auth, confirmation, logger });
+const server = createHttpServer(processor, store, { auth, confirmation, logger, ingressSigningSecret: process.env.INGRESS_EVENT_SECRET, requireIngressSignature: process.env.NODE_ENV === "production" });
 const port = Number(process.env.PORT || 8090);
 const host = process.env.HOST || "127.0.0.1";
 
 let baseSyncWorker: BaseSyncWorker | undefined;
 if (baseSyncEnabled) {
   baseSyncWorker = new BaseSyncWorker(store, baseClient!, logger, {
-    batchSize: Number(process.env.BASE_SYNC_BATCH_SIZE || 20),
-    pollIntervalMs: Number(process.env.BASE_SYNC_POLL_MS || 5_000),
+    batchSize: Number.isFinite(Number(process.env.BASE_SYNC_BATCH_SIZE)) ? Number(process.env.BASE_SYNC_BATCH_SIZE) : 20,
+    pollIntervalMs: Number.isFinite(Number(process.env.BASE_SYNC_POLL_MS)) ? Number(process.env.BASE_SYNC_POLL_MS) : 5_000,
   });
 }
 
@@ -133,12 +134,22 @@ if (process.env.RUN_LARK_CONSUMER === "true") {
   const delivery = new EventDeliveryService(
     new FileSpoolStore(process.env.FORWARDER_SPOOL_DIR || "data/forwarder-spool"),
     { process: (message) => processor.process(message) },
-    { reply: async (messageId, reply) => { if (reply.text) await lark.reply(messageId, reply.text); } },
+    new LarkCliReplySender(process.env.LARK_CLI_BIN || "lark-cli"),
     logger,
     { maxRetries: Number(process.env.FORWARDER_MAX_RETRIES || 5), retryBaseMs: Number(process.env.FORWARDER_RETRY_BASE_MS || 500) },
+    new LarkCliSenderDirectory(process.env.LARK_CLI_BIN || "lark-cli"),
   );
-  void delivery.replay();
+  let replaying = false;
+  const replay = async () => {
+    if (replaying) return;
+    replaying = true;
+    try { await delivery.replay(); } catch (error) { logger.error("lark_replay_failed", { error }); } finally { replaying = false; }
+  };
+  void replay();
+  const replayTimer = setInterval(() => void replay(), Number(process.env.FORWARDER_REPLAY_INTERVAL_MS || 30_000));
   lark.start(async (message) => { await delivery.acceptMessage(message); });
+  process.once("SIGTERM", () => clearInterval(replayTimer));
+  process.once("SIGINT", () => clearInterval(replayTimer));
 }
 
 let shuttingDown = false;

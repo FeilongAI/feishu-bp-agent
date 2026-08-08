@@ -88,6 +88,16 @@ test("issues scoped confirmation tokens and rejects tampering and expiry", () =>
   assert.equal(confirmation.verify(issued.token, input, 62_000), false);
 });
 
+test("consumes persistent confirmations only once across service instances", async () => {
+  const store = new InMemoryRequirementStore();
+  const input = { action: "DELETE_REQUIREMENT", actorId: "admin", resourceId: "REQ-2", body: {} };
+  const first = new ConfirmationService("a-secure-confirmation-secret-with-32-chars");
+  const second = new ConfirmationService("a-secure-confirmation-secret-with-32-chars");
+  const issued = first.issue(input);
+  assert.equal(await first.consumePersistent(issued.token, input, store), true);
+  assert.equal(await second.consumePersistent(issued.token, input, store), false);
+});
+
 test("authenticates bearer and x-api-key values without accepting the other role key", () => {
   const config = { adminApiKey: "admin-key-with-at-least-24-characters", ingressApiKey: "ingress-key-with-at-least-24-chars" };
   const admin = { headers: { authorization: `Bearer ${config.adminApiKey}` } } as never;

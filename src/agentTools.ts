@@ -62,7 +62,9 @@ const definitions: AgentToolDefinition[] = [
 
 export function createAgentToolRuntime(context: AgentToolContext): AgentToolRuntime {
   return {
-    definitions,
+    // Each conversation may add MCP tools; never mutate the module-level
+    // built-in definition array shared by concurrent requests.
+    definitions: [...definitions],
     executor: {
       async execute(name, argumentsJson) {
         let args: Record<string, unknown> = {};

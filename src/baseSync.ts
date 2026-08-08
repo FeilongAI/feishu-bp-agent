@@ -26,7 +26,7 @@ export class BaseSyncWorker {
     this.client = client;
     this.logger = logger;
     this.batchSize = Math.max(1, Math.min(options.batchSize ?? 20, 20));
-    this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
+    this.pollIntervalMs = Number.isFinite(options.pollIntervalMs) ? Math.max(500, Math.min(Math.trunc(options.pollIntervalMs!), 300_000)) : 5_000;
   }
 
   start(): void {
@@ -77,7 +77,7 @@ export class BaseSyncWorker {
           try {
             await this.client.updateRequirement(recordId, requirement);
           } catch (error) {
-            if (!(error instanceof FeishuApiError) || error.code !== 1254043) throw error;
+            if (!(error instanceof FeishuApiError) || (error.code !== 1254043 && error.status !== 404)) throw error;
             recordId = await this.client.createRequirement(requirement, outboxClientToken(item.id));
           }
         } else {

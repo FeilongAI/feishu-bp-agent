@@ -3,6 +3,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { ConfirmationService } from "../src/confirmation.ts";
+import { ingressSignature } from "../src/auth.ts";
 import { ConversationService } from "../src/conversation.ts";
 import { createHttpServer } from "../src/http.ts";
 import type { Logger } from "../src/logger.ts";
@@ -68,5 +69,27 @@ test("protects APIs and requires confirmation for requirement mutations", async 
   });
   assert.equal(updated.status, 200);
   assert.equal((await store.listRequirements())[0].status, "进行中");
+  server.close();
+});
+
+test("requires a valid ingress signature and explicit message identity enums", async () => {
+  const store = new InMemoryRequirementStore();
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), {
+    allowedTenantKeys: new Set(), allowedUserIds: new Set(), allowedChatIds: new Set(), groupRequireMention: false,
+  }, silentLogger);
+  const secret = "ingress-signing-secret-with-at-least-32-chars";
+  const server = createHttpServer(processor, store, {
+    auth: { adminApiKey: adminKey, ingressApiKey: ingressKey },
+    confirmation: new ConfirmationService("a-secure-confirmation-secret-with-32-chars"),
+    logger: silentLogger, ingressSigningSecret: secret, requireIngressSignature: true,
+  });
+  const body = { chatId: "oc_test", chatType: "p2p", senderId: "ou_user", senderType: "user", messageId: "om_ingress", content: "你好" };
+  const raw = JSON.stringify(body);
+  const headers = { authorization: `Bearer ${ingressKey}`, "content-type": "application/json" };
+  assert.equal((await request(server, { method: "POST", url: "/api/messages", headers, body })).status, 401);
+  assert.equal((await request(server, { method: "POST", url: "/api/messages", headers: { ...headers, "x-ingress-signature": ingressSignature(raw, secret).replace(/.$/, "0") }, body })).status, 401);
+  const invalidBody = { ...body, chatType: "unknown" };
+  assert.equal((await request(server, { method: "POST", url: "/api/messages", headers: { ...headers, "x-ingress-signature": ingressSignature(JSON.stringify(invalidBody), secret) }, body: invalidBody })).status, 400);
+  assert.equal((await request(server, { method: "POST", url: "/api/messages", headers: { ...headers, "x-ingress-signature": ingressSignature(raw, secret) }, body })).status, 200);
   server.close();
 });

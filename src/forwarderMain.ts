@@ -18,6 +18,7 @@ const delivery = new EventDeliveryService(
   new CoreAgentHttpClient({
     url: process.env.FORWARDER_CORE_URL || "http://127.0.0.1:8090",
     ingressApiKey: process.env.INGRESS_API_KEY || "",
+    ingressSigningSecret: process.env.INGRESS_EVENT_SECRET,
     timeoutMs: numberEnv("FORWARDER_HTTP_TIMEOUT_MS", 20_000, 500, 60_000),
   }),
   new LarkCliReplySender(bin),

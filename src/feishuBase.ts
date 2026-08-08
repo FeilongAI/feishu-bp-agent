@@ -131,10 +131,9 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
 
   async listFields(): Promise<BaseField[]> {
     const fields: BaseField[] = [];
-    let pageToken: string | undefined;
-    do {
-      const query = new URLSearchParams({ page_size: "200" });
-      if (pageToken) query.set("page_token", pageToken);
+    let offset = 0;
+    for (let page = 0; page < 100; page += 1) {
+      const query = new URLSearchParams({ limit: "200", offset: String(offset) });
       const data = await this.request("GET", `${this.fieldsPath()}?${query.toString()}`);
       const items = Array.isArray(data.items) ? data.items : Array.isArray(data.fields) ? data.fields : [];
       for (const item of items) {
@@ -145,13 +144,16 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
         fields.push({
           fieldId,
           name,
-          type: typeof field.type === "string" ? field.type : undefined,
+          type: typeof field.type === "string" || typeof field.type === "number" ? String(field.type) : undefined,
           isPrimary: field.is_primary === true || field.isPrimary === true,
         });
       }
-      pageToken = typeof data.page_token === "string" && data.page_token ? data.page_token : undefined;
-      if (data.has_more !== true) pageToken = undefined;
-    } while (pageToken);
+      const hasMore = data.has_more === true || (typeof data.total === "number" && offset + items.length < data.total);
+      if (!hasMore || !items.length) break;
+      const nextOffset = typeof data.offset === "number" ? data.offset : offset + items.length;
+      if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) break;
+      offset = nextOffset;
+    }
     return fields;
   }
 
@@ -178,9 +180,15 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
       [field.progress]: requirement.progress,
       [field.visibility]: requirement.visibility,
       [field.sourceChatId]: requirement.sourceChatId,
-      [field.createdAt]: Date.parse(requirement.createdAt),
-      [field.updatedAt]: Date.parse(requirement.updatedAt),
+      [field.createdAt]: this.baseDateTime(requirement.createdAt),
+      [field.updatedAt]: this.baseDateTime(requirement.updatedAt),
     });
+  }
+
+  private baseDateTime(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toISOString().slice(0, 19).replace("T", " ");
   }
 
   private recordsPath(): string {

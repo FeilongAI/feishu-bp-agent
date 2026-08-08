@@ -60,6 +60,10 @@ export class ConversationService {
     // invoking the model so a confirmation message cannot trigger a fresh tool call.
     if (this.isMcpConfirmation(text) && conversation.pendingMcpAction) {
       const pending = conversation.pendingMcpAction;
+      if (pending.state === "executing") {
+        await this.store.saveConversation(conversation);
+        return { text: "这项飞书操作上一次执行状态不明，已停止自动重试，请先确认远端文档状态。" };
+      }
       if (pending.requestedById !== message.senderId) {
         await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CONFIRM", resourceId: pending.toolName, result: "denied" }).catch(() => undefined);
         await this.store.saveConversation(conversation);
@@ -74,6 +78,8 @@ export class ConversationService {
         await this.store.saveConversation(conversation);
         return { text: "当前 MCP 服务不可用，未执行任何操作。" };
       }
+      pending.state = "executing";
+      await this.store.saveConversation(conversation);
       const result = await this.config.mcp.callTool(pending.toolName, pending.argumentsJson).catch(() => ({ ok: false, error: "mcp_unavailable" }));
       if (this.mcpResultOk(result)) delete conversation.pendingMcpAction;
       await this.store.recordAudit({ actorId: message.senderId, action: "MCP_CONFIRM", resourceId: pending.toolName, result: this.mcpResultOk(result) ? "success" : "failed" }).catch(() => undefined);
@@ -113,10 +119,12 @@ export class ConversationService {
         baseUrl: this.config.baseUrl,
         baseAdmin: this.config.baseAdmin,
       });
-      const mcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
-      runtime.definitions.push(...mcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name)));
+      const discoveredMcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
+      const mcpTools = discoveredMcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name));
+      runtime.definitions.push(...mcpTools);
       let mcpActionRequested = false;
       let mcpActionDenied = false;
+      let mcpActionConflict = false;
       let agentToolFailed = false;
       const markToolResult = (result: unknown): unknown => {
         if (result && typeof result === "object" && (result as Record<string, unknown>).ok === false) agentToolFailed = true;
@@ -130,6 +138,10 @@ export class ConversationService {
                 mcpActionDenied = true;
                 return { ok: false, error: "mcp_confirmation_owned_by_other" };
               }
+              if (conversation.pendingMcpAction) {
+                mcpActionConflict = true;
+                return { ok: false, error: "mcp_confirmation_already_pending" };
+              }
               if (!conversation.pendingMcpAction || conversation.pendingMcpAction.requestedById === message.senderId) {
                 conversation.pendingMcpAction = {
                   toolName: name,
@@ -137,6 +149,7 @@ export class ConversationService {
                   requestedById: message.senderId,
                   requestedAt: new Date().toISOString(),
                   expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+                  state: "pending",
                 };
               }
               mcpActionRequested = true;
@@ -156,6 +169,10 @@ export class ConversationService {
         senderId: message.senderId,
         senderName: message.senderName,
       }, runtime.definitions, executor).catch(() => undefined);
+      if (mcpActionConflict) {
+        await this.store.saveConversation(conversation);
+        return { text: "已有一项飞书写操作等待确认，请先确认或取消当前操作。" };
+      }
       if (mcpActionRequested && conversation.pendingMcpAction) {
         await this.store.saveConversation(conversation);
         return { text: `检测到需要执行飞书写操作“${conversation.pendingMcpAction.toolName}”。为避免误操作，请核对请求后回复“确认执行”；如不执行请回复“取消操作”。` };

@@ -38,6 +38,15 @@ export function isMcpMutationTool(name: string): boolean {
   return !/(?:^|[-_.])(?:get|list|search|fetch|find|query|read|describe|check|view|retrieve|download|export|lookup)(?:[-_.]|$)/i.test(normalized);
 }
 
+export function exposedMcpToolName(remoteName: string, usedNames = new Map<string, string>()): string {
+  const safeName = remoteName.replace(/[^A-Za-z0-9_-]/g, "_");
+  const digest = createHash("sha256").update(remoteName).digest("hex").slice(0, 8);
+  let exposed = safeName.length <= 64 ? safeName : `${safeName.slice(0, 55)}_${digest}`;
+  const existing = usedNames.get(exposed);
+  if (existing && existing !== remoteName) exposed = `${safeName.slice(0, Math.max(1, 55 - digest.length - 1))}_${digest}`.slice(0, 64);
+  return exposed;
+}
+
 export class LarkMcpClient implements McpToolProvider {
   private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">;
   private readonly logger: Logger;
@@ -162,9 +171,9 @@ export class LarkMcpClient implements McpToolProvider {
     const parameters = tool.inputSchema && typeof tool.inputSchema === "object" && !Array.isArray(tool.inputSchema)
       ? tool.inputSchema as Record<string, unknown>
       : { type: "object", properties: {} };
-    const exposedName = name.length <= 64
-      ? name
-      : `${name.slice(0, 55)}_${createHash("sha256").update(name).digest("hex").slice(0, 8)}`;
+    // Sanitization can collide with an already exposed remote name (for
+    // example `foo.bar` and `foo_bar`). Keep the mapping one-to-one.
+    const exposedName = exposedMcpToolName(name, this.exposedToRemoteName);
     this.exposedToRemoteName.set(exposedName, name);
     return { type: "function", function: { name: exposedName, description: description.slice(0, 800), parameters } };
   }

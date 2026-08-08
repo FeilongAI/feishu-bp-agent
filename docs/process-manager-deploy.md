@@ -25,9 +25,14 @@ Deploy an update with:
 ```bash
 git pull --ff-only
 npm ci --omit=dev
+set -a
+. /etc/feishu-bp-agent.env
+set +a
 npm run migrate
 pm2 reload feishu-bp-agent --update-env
 ```
+
+The `set -a` block is intentional: PM2 keeps its own environment snapshot, so reloading without sourcing the file can leave `INGRESS_EVENT_SECRET`, database credentials, or MCP settings stale.
 
 To run the CLI message gateway under PM2, first install the pinned official CLI and initialize the Bot profile as the service user. Pass the secret over stdin, not in command arguments:
 

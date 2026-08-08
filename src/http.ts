@@ -1,10 +1,10 @@
 import { createServer, type IncomingMessage as HttpRequest, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { authenticateRequest, type ApiAuthConfig, type ApiRole } from "./auth.ts";
+import { authenticateRequest, verifyIngressSignature, type ApiAuthConfig, type ApiRole } from "./auth.ts";
 import type { ConfirmationService } from "./confirmation.ts";
 import type { Logger } from "./logger.ts";
 import type { MessageProcessor } from "./messageProcessor.ts";
-import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage, type RequirementStore, type RequirementStatus } from "./types.ts";
+import { isSafeMessageIdentifier, MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_MENTIONS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage, type RequirementStore, type RequirementStatus } from "./types.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUIREMENT_STATUSES = new Set<RequirementStatus>(["待评估", "已排期", "进行中", "待验收", "已完成", "暂缓"]);
@@ -14,19 +14,26 @@ export interface HttpServerOptions {
   auth: ApiAuthConfig;
   confirmation: ConfirmationService;
   logger: Logger;
+  ingressSigningSecret?: string;
+  requireIngressSignature?: boolean;
 }
 
 async function readJson(request: HttpRequest): Promise<unknown> {
-  let body = "";
-  for await (const chunk of request) {
-    body += String(chunk);
-    if (Buffer.byteLength(body) > MAX_BODY_BYTES) throw new HttpError(413, "request_too_large");
-  }
+  const body = await readBody(request);
   try {
     return body ? JSON.parse(body) : {};
   } catch {
     throw new HttpError(400, "invalid_json");
   }
+}
+
+async function readBody(request: HttpRequest): Promise<string> {
+  let body = "";
+  for await (const chunk of request) {
+    body += String(chunk);
+    if (Buffer.byteLength(body) > MAX_BODY_BYTES) throw new HttpError(413, "request_too_large");
+  }
+  return body;
 }
 
 function json(response: ServerResponse, status: number, data: unknown): void {
@@ -55,15 +62,23 @@ function normalizedMessage(body: Record<string, unknown>): IncomingMessage {
   const senderId = value("senderId", "sender_id");
   const messageId = value("messageId", "message_id");
   const content = body.content;
-  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS
-    || typeof senderId !== "string" || !senderId || senderId.length > MAX_MESSAGE_IDENTIFIER_CHARS
-    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(chatId)
+    || typeof senderId !== "string" || !senderId || senderId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(senderId)
+    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(messageId)
     || typeof content !== "string" || !content.trim() || content.length > MAX_MESSAGE_CONTENT_CHARS) {
     throw new HttpError(400, "chatId, senderId, messageId and content are required");
   }
+  const chatTypeValue = value("chatType", "chat_type");
+  const senderTypeValue = value("senderType", "sender_type");
+  if (chatTypeValue !== "p2p" && chatTypeValue !== "group") throw new HttpError(400, "invalid_chat_type");
+  if (senderTypeValue !== "user" && senderTypeValue !== "bot") throw new HttpError(400, "invalid_sender_type");
+  const tenantKey = value("tenantKey", "tenant_key");
+  const threadId = value("threadId", "thread_id");
+  if (tenantKey !== undefined && (typeof tenantKey !== "string" || tenantKey.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(tenantKey))) throw new HttpError(400, "invalid_tenant_key");
+  if (threadId !== undefined && (typeof threadId !== "string" || threadId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(threadId))) throw new HttpError(400, "invalid_thread_id");
   const mentions = Array.isArray(body.mentions)
-    ? body.mentions.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string"
-      ? [{ id: String((item as Record<string, unknown>).id), name: typeof (item as Record<string, unknown>).name === "string" ? String((item as Record<string, unknown>).name) : undefined }]
+    ? body.mentions.slice(0, MAX_MESSAGE_MENTIONS).flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && isSafeMessageIdentifier(String((item as Record<string, unknown>).id))
+      ? [{ id: String((item as Record<string, unknown>).id), name: typeof (item as Record<string, unknown>).name === "string" ? String((item as Record<string, unknown>).name).slice(0, MAX_MESSAGE_NAME_CHARS) : undefined }]
       : [])
     : undefined;
   return {
@@ -71,11 +86,11 @@ function normalizedMessage(body: Record<string, unknown>): IncomingMessage {
     senderId,
     messageId,
     content,
-    chatType: value("chatType", "chat_type") === "group" ? "group" : "p2p",
-    tenantKey: typeof value("tenantKey", "tenant_key") === "string" ? String(value("tenantKey", "tenant_key")) : undefined,
+    chatType: chatTypeValue === "group" ? "group" : "p2p",
+    tenantKey: typeof tenantKey === "string" ? tenantKey : undefined,
     senderName: typeof value("senderName", "sender_name") === "string" && String(value("senderName", "sender_name")).length <= MAX_MESSAGE_NAME_CHARS ? String(value("senderName", "sender_name")) : undefined,
-    senderType: value("senderType", "sender_type") === "bot" ? "bot" : "user",
-    threadId: typeof value("threadId", "thread_id") === "string" ? String(value("threadId", "thread_id")) : undefined,
+    senderType: senderTypeValue === "bot" ? "bot" : "user",
+    threadId: typeof threadId === "string" ? threadId : undefined,
     mentions,
   };
 }
@@ -108,7 +123,12 @@ export function createHttpServer(processor: MessageProcessor, store: Requirement
 
       if (request.method === "POST" && request.url === "/api/messages") {
         if (!await requireAuth("ingress")) return;
-        const body = await readJson(request);
+        const raw = await readBody(request);
+        if (options.requireIngressSignature && !verifyIngressSignature(raw, typeof request.headers["x-ingress-signature"] === "string" ? request.headers["x-ingress-signature"] : undefined, options.ingressSigningSecret || "")) {
+          return json(response, 401, { ok: false, error: "invalid_ingress_signature", requestId });
+        }
+        let body: unknown;
+        try { body = raw ? JSON.parse(raw) : {}; } catch { throw new HttpError(400, "invalid_json"); }
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "invalid_message");
         const reply = await processor.process(normalizedMessage(body as Record<string, unknown>));
         return json(response, 200, { ok: true, reply });
@@ -149,7 +169,7 @@ export function createHttpServer(processor: MessageProcessor, store: Requirement
         const action = request.method === "PATCH" ? "PATCH_REQUIREMENT" : "DELETE_REQUIREMENT";
         const confirmationHeader = request.headers["x-confirmation-token"];
         const confirmationToken = Array.isArray(confirmationHeader) ? confirmationHeader[0] : confirmationHeader;
-        if (!confirmationToken || !options.confirmation.consume(confirmationToken, { action, actorId, resourceId: id, body })) {
+        if (!confirmationToken || !await options.confirmation.consumePersistent(confirmationToken, { action, actorId, resourceId: id, body }, store)) {
           await store.recordAudit({ actorId, action, resourceId: id, payload: body, result: "denied" });
           return json(response, 409, { ok: false, error: "confirmation_required", requestId });
         }

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Logger } from "./logger.ts";
-import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage } from "./types.ts";
+import { isSafeMessageIdentifier, MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, MAX_MESSAGE_MENTIONS, MAX_MESSAGE_NAME_CHARS, type IncomingMessage } from "./types.ts";
 
 export interface LarkClient {
   start(onMessage: (message: IncomingMessage) => Promise<void> | void): ChildProcessWithoutNullStreams;
@@ -36,27 +36,35 @@ export function normalizeLarkEvent(input: Record<string, unknown>): IncomingMess
   const messageId = message.message_id ?? envelope.message_id;
   const openId = senderId.open_id ?? envelope.sender_id;
   const content = textContent(message.content ?? envelope.content);
-  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS
-    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS
-    || typeof openId !== "string" || !openId || openId.length > MAX_MESSAGE_IDENTIFIER_CHARS
+  const chatType = message.chat_type ?? envelope.chat_type;
+  const senderTypeValue = message.sender_type ?? envelope.sender_type;
+  if (chatType !== undefined && chatType !== "group" && chatType !== "p2p") return undefined;
+  if (senderTypeValue !== undefined && senderTypeValue !== "user") return undefined;
+  const threadId = message.thread_id ?? message.root_id;
+  const tenantKey = header.tenant_key;
+  if (typeof chatId !== "string" || !chatId || chatId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(chatId)
+    || typeof messageId !== "string" || !messageId || messageId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(messageId)
+    || typeof openId !== "string" || !openId || openId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(openId)
+    || (threadId !== undefined && (typeof threadId !== "string" || threadId.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(threadId)))
+    || (tenantKey !== undefined && (typeof tenantKey !== "string" || tenantKey.length > MAX_MESSAGE_IDENTIFIER_CHARS || !isSafeMessageIdentifier(tenantKey)))
     || !content.trim() || content.length > MAX_MESSAGE_CONTENT_CHARS) return undefined;
   const mentions = Array.isArray(message.mentions)
-    ? message.mentions.flatMap((item) => {
+    ? message.mentions.slice(0, MAX_MESSAGE_MENTIONS).flatMap((item) => {
       const mention = object(item);
       const id = object(mention.id).open_id ?? mention.open_id ?? mention.id;
-      return typeof id === "string" ? [{ id, name: typeof mention.name === "string" ? mention.name : undefined }] : [];
+      return typeof id === "string" && isSafeMessageIdentifier(id) ? [{ id, name: typeof mention.name === "string" ? mention.name.slice(0, MAX_MESSAGE_NAME_CHARS) : undefined }] : [];
     })
     : undefined;
   return {
     chatId,
-    chatType: message.chat_type === "group" ? "group" : "p2p",
-    tenantKey: typeof header.tenant_key === "string" ? header.tenant_key : undefined,
+    chatType: chatType === "group" ? "group" : "p2p",
+    tenantKey: typeof tenantKey === "string" ? tenantKey : undefined,
     senderId: openId,
     senderName: typeof sender.sender_name === "string" && sender.sender_name.length <= MAX_MESSAGE_NAME_CHARS ? sender.sender_name : undefined,
     messageId,
     content,
     senderType: "user",
-    threadId: typeof message.thread_id === "string" ? message.thread_id : typeof message.root_id === "string" ? message.root_id : undefined,
+    threadId: typeof threadId === "string" ? threadId : undefined,
     mentions,
   };
 }

@@ -2,13 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { ingressSignature } from "./auth.ts";
 import type { Logger } from "./logger.ts";
 import { normalizeLarkEvent } from "./lark.ts";
-import { MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, type BotReply, type IncomingMessage } from "./types.ts";
+import { isSafeMessageIdentifier, MAX_MESSAGE_CONTENT_CHARS, MAX_MESSAGE_IDENTIFIER_CHARS, type BotReply, type IncomingMessage } from "./types.ts";
 
 export interface CoreAgentConfig {
   url: string;
   ingressApiKey: string;
+  ingressSigningSecret?: string;
   timeoutMs: number;
 }
 
@@ -59,9 +61,9 @@ function spoolName(messageId: string): string {
 function isIncomingMessage(value: unknown): value is IncomingMessage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return typeof item.chatId === "string" && Boolean(item.chatId) && item.chatId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
-    && typeof item.senderId === "string" && Boolean(item.senderId) && item.senderId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
-    && typeof item.messageId === "string" && Boolean(item.messageId) && item.messageId.length <= MAX_MESSAGE_IDENTIFIER_CHARS
+  return typeof item.chatId === "string" && Boolean(item.chatId) && item.chatId.length <= MAX_MESSAGE_IDENTIFIER_CHARS && isSafeMessageIdentifier(item.chatId)
+    && typeof item.senderId === "string" && Boolean(item.senderId) && item.senderId.length <= MAX_MESSAGE_IDENTIFIER_CHARS && isSafeMessageIdentifier(item.senderId)
+    && typeof item.messageId === "string" && Boolean(item.messageId) && item.messageId.length <= MAX_MESSAGE_IDENTIFIER_CHARS && isSafeMessageIdentifier(item.messageId)
     && typeof item.content === "string" && Boolean(item.content.trim()) && item.content.length <= MAX_MESSAGE_CONTENT_CHARS;
 }
 
@@ -75,6 +77,7 @@ export class CoreAgentHttpClient implements CoreAgent {
     this.config = {
       url: config.url.replace(/\/+$/, ""),
       ingressApiKey: config.ingressApiKey,
+      ingressSigningSecret: config.ingressSigningSecret,
       timeoutMs: bounded(config.timeoutMs, 10_000, 500, 60_000),
     };
     this.fetchImpl = fetchImpl;
@@ -84,20 +87,23 @@ export class CoreAgentHttpClient implements CoreAgent {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
+      const body = JSON.stringify(message);
+      const headers: Record<string, string> = {
+        authorization: `Bearer ${this.config.ingressApiKey}`,
+        "content-type": "application/json",
+        "x-request-id": `lark-${message.messageId}`.slice(0, 120),
+      };
+      if (this.config.ingressSigningSecret) headers["x-ingress-signature"] = ingressSignature(body, this.config.ingressSigningSecret);
       const response = await this.fetchImpl(`${this.config.url}/api/messages`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${this.config.ingressApiKey}`,
-          "content-type": "application/json",
-          "x-request-id": `lark-${message.messageId}`.slice(0, 120),
-        },
-        body: JSON.stringify(message),
+        headers,
+        body,
         signal: controller.signal,
       });
       if (!response.ok) throw new CoreAgentError(`core_agent_http_${response.status}`, response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500);
-      const body = await response.json() as { ok?: unknown; reply?: { text?: unknown; replyInThread?: unknown } };
-      if (body.ok !== true || !body.reply || typeof body.reply.text !== "string") throw new CoreAgentError("core_agent_invalid_response", true);
-      return { text: body.reply.text, replyInThread: body.reply.replyInThread === true };
+      const payload = await response.json() as { ok?: unknown; reply?: { text?: unknown; replyInThread?: unknown } };
+      if (payload.ok !== true || !payload.reply || typeof payload.reply.text !== "string") throw new CoreAgentError("core_agent_invalid_response", true);
+      return { text: payload.reply.text, replyInThread: payload.reply.replyInThread === true };
     } catch (error) {
       if (error instanceof CoreAgentError) throw error;
       throw new CoreAgentError(error instanceof Error ? `core_agent_${error.name}` : "core_agent_unknown_error", true);

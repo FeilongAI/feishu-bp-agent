@@ -151,25 +151,25 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
 
     const reclaimed = await this.db.query(
       `UPDATE bp_processed_message SET status = 'processing', reply = NULL, error_code = NULL, updated_at = NOW()
-       WHERE message_id = $1 AND (status = 'failed' OR (status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes'))
+       WHERE message_id = $1 AND conversation_key = $2 AND (status = 'failed' OR (status = 'processing' AND updated_at < NOW() - INTERVAL '5 minutes'))
        RETURNING status`,
-      [messageId],
+      [messageId, conversationKey],
     );
     if (reclaimed.rowCount === 1) return { claimed: true, status: "processing" };
 
-    const existing = await this.db.query("SELECT status, reply FROM bp_processed_message WHERE message_id = $1", [messageId]);
+    const existing = await this.db.query("SELECT conversation_key, status, reply FROM bp_processed_message WHERE message_id = $1", [messageId]);
     const row = existing.rows[0];
     if (!row) return { claimed: false, status: "failed" };
     return {
       claimed: false,
       status: String(row.status) as ProcessedMessageClaim["status"],
-      reply: row.reply ? row.reply as unknown as BotReply : undefined,
+      reply: String(row.conversation_key) === conversationKey && row.reply ? row.reply as unknown as BotReply : undefined,
     };
   }
 
   async completeMessage(messageId: string, reply: BotReply): Promise<void> {
     await this.db.query(
-      "UPDATE bp_processed_message SET status = 'completed', reply = $2::jsonb, error_code = NULL, updated_at = NOW() WHERE message_id = $1",
+      "UPDATE bp_processed_message SET status = 'completed', reply = $2::jsonb, error_code = NULL, updated_at = NOW() WHERE message_id = $1 AND status = 'processing'",
       [messageId, JSON.stringify(reply)],
     );
   }
@@ -178,9 +178,21 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
     await this.db.query(
       `INSERT INTO bp_processed_message (message_id, conversation_key, status, error_code)
        VALUES ($1, 'unknown', 'failed', $2)
-       ON CONFLICT (message_id) DO UPDATE SET status = 'failed', error_code = EXCLUDED.error_code, updated_at = NOW()`,
+       ON CONFLICT (message_id) DO UPDATE SET status = 'failed', error_code = EXCLUDED.error_code, updated_at = NOW()
+       WHERE bp_processed_message.status = 'processing'`,
       [messageId, errorCode],
     );
+  }
+
+  async consumeConfirmation(jti: string, expiresAt: Date): Promise<boolean> {
+    const result = await this.db.query(
+      `INSERT INTO bp_confirmation_consumption (jti, expires_at)
+       VALUES ($1, $2)
+       ON CONFLICT (jti) DO NOTHING
+       RETURNING jti`,
+      [jti, expiresAt.toISOString()],
+    );
+    return result.rowCount === 1;
   }
 
   async withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T> {

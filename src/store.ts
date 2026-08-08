@@ -7,6 +7,7 @@ export class InMemoryRequirementStore implements RequirementStore {
   private readonly conversations = new Map<string, ConversationState>();
   private readonly requirements = new Map<string, Requirement>();
   private readonly processedMessages = new Map<string, { status: "processing" | "completed" | "failed"; reply?: BotReply }>();
+  private readonly consumedConfirmations = new Map<string, number>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly filePath?: string;
 
@@ -61,19 +62,38 @@ export class InMemoryRequirementStore implements RequirementStore {
     const existing = this.processedMessages.get(messageId);
     if (existing?.status === "failed") {
       this.processedMessages.set(messageId, { status: "processing" });
+      this.persist();
       return { claimed: true, status: "processing" };
     }
     if (existing) return { claimed: false, ...structuredClone(existing) };
     this.processedMessages.set(messageId, { status: "processing" });
+    this.persist();
     return { claimed: true, status: "processing" };
   }
 
   async completeMessage(messageId: string, reply: BotReply): Promise<void> {
-    this.processedMessages.set(messageId, { status: "completed", reply: structuredClone(reply) });
+    const existing = this.processedMessages.get(messageId);
+    if (existing?.status === "processing") {
+      this.processedMessages.set(messageId, { status: "completed", reply: structuredClone(reply) });
+      this.persist();
+    }
   }
 
   async failMessage(messageId: string, _errorCode: string): Promise<void> {
-    this.processedMessages.set(messageId, { status: "failed" });
+    const existing = this.processedMessages.get(messageId);
+    if (existing?.status === "processing") {
+      this.processedMessages.set(messageId, { status: "failed" });
+      this.persist();
+    }
+  }
+
+  async consumeConfirmation(jti: string, expiresAt: Date): Promise<boolean> {
+    const now = Date.now();
+    for (const [key, expiry] of this.consumedConfirmations) if (expiry <= now) this.consumedConfirmations.delete(key);
+    if (this.consumedConfirmations.has(jti)) return false;
+    this.consumedConfirmations.set(jti, expiresAt.getTime());
+    this.persist();
+    return true;
   }
 
   async withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T> {
@@ -100,9 +120,11 @@ export class InMemoryRequirementStore implements RequirementStore {
   private load(): void {
     if (!this.filePath || !existsSync(this.filePath)) return;
     try {
-      const data = JSON.parse(readFileSync(this.filePath, "utf8")) as { conversations?: ConversationState[]; requirements?: Requirement[] };
+      const data = JSON.parse(readFileSync(this.filePath, "utf8")) as { conversations?: ConversationState[]; requirements?: Requirement[]; processedMessages?: Array<[string, { status: "processing" | "completed" | "failed"; reply?: BotReply }]>; consumedConfirmations?: Array<[string, number]> };
       for (const conversation of data.conversations ?? []) this.conversations.set(conversation.key, conversation);
       for (const requirement of data.requirements ?? []) this.requirements.set(requirement.id, requirement);
+      for (const [messageId, value] of data.processedMessages ?? []) this.processedMessages.set(messageId, value);
+      for (const [jti, expiresAt] of data.consumedConfirmations ?? []) if (typeof jti === "string" && Number.isFinite(expiresAt)) this.consumedConfirmations.set(jti, expiresAt);
     } catch (error) {
       process.stderr.write(`[store] unable to load ${this.filePath}: ${String(error)}\n`);
     }
@@ -111,6 +133,6 @@ export class InMemoryRequirementStore implements RequirementStore {
   private persist(): void {
     if (!this.filePath) return;
     mkdirSync(dirname(this.filePath), { recursive: true });
-    writeFileSync(this.filePath, JSON.stringify({ conversations: [...this.conversations.values()], requirements: [...this.requirements.values()] }, null, 2));
+    writeFileSync(this.filePath, JSON.stringify({ conversations: [...this.conversations.values()], requirements: [...this.requirements.values()], processedMessages: [...this.processedMessages.entries()], consumedConfirmations: [...this.consumedConfirmations.entries()] }, null, 2));
   }
 }

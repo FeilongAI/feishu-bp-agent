@@ -4,6 +4,8 @@ ARG LARK_MCP_VERSION=0.5.1
 
 RUN npm install --global --no-audit --no-fund "@larksuiteoapi/lark-mcp@${LARK_MCP_VERSION}"
 
+RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app
+
 ENV APP_ID= \
     APP_SECRET= \
     LARK_DOMAIN=https://open.feishu.cn \
@@ -11,6 +13,8 @@ ENV APP_ID= \
     LARK_TOOLS=
 
 EXPOSE 3000
+
+USER app
 
 ENTRYPOINT ["lark-mcp", "mcp"]
 CMD ["--mode", "streamable", "--host", "0.0.0.0", "--port", "3000", "--language", "zh", "--tool-name-case", "snake"]

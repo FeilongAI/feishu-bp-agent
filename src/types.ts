@@ -2,6 +2,11 @@ export type DraftState = "collecting" | "awaiting_confirmation";
 export const MAX_MESSAGE_CONTENT_CHARS = 20_000;
 export const MAX_MESSAGE_IDENTIFIER_CHARS = 256;
 export const MAX_MESSAGE_NAME_CHARS = 200;
+export const MAX_MESSAGE_MENTIONS = 50;
+
+export function isSafeMessageIdentifier(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value);
+}
 export type RequirementStatus =
   | "待评估"
   | "已排期"
@@ -76,6 +81,7 @@ export interface PendingMcpAction {
   requestedById: string;
   requestedAt: string;
   expiresAt: string;
+  state?: "pending" | "executing";
 }
 
 export interface IncomingMessage {
@@ -137,6 +143,7 @@ export interface RequirementStore {
   claimMessage(messageId: string, conversationKey: string): Promise<ProcessedMessageClaim>;
   completeMessage(messageId: string, reply: BotReply): Promise<void>;
   failMessage(messageId: string, errorCode: string): Promise<void>;
+  consumeConfirmation(jti: string, expiresAt: Date): Promise<boolean>;
   withConversationLock<T>(conversationKey: string, operation: (store: RequirementStore) => Promise<T>): Promise<T>;
   recordAudit(event: AdminAuditEvent): Promise<void>;
   healthCheck(): Promise<void>;

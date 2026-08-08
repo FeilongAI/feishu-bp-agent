@@ -43,7 +43,7 @@ test("uses the official Base record API, tenant token cache, and client_token", 
   const createBody = JSON.parse(String(calls[1].init?.body)) as Record<string, unknown>;
   assert.equal(createBody["需求ID"], requirement.id);
   assert.deepEqual(createBody["投放平台"], ["Meta"]);
-  assert.equal(createBody["创建时间"], Date.parse(requirement.createdAt));
+  assert.equal(createBody["创建时间"], "2026-08-05 01:02:03");
 });
 
 test("treats deleting an already absent Base record as success", async () => {
@@ -60,7 +60,7 @@ test("lists paginated Base fields and deletes by encoded field id", async () => 
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const responses = [
     { code: 0, tenant_access_token: "tenant-token", expire: 7200 },
-    { code: 0, data: { items: [{ field_id: "fld_1", name: "负责人" }], page_token: "next", has_more: true } },
+    { code: 0, data: { items: [{ field_id: "fld_1", name: "负责人" }], offset: 200, has_more: true } },
     { code: 0, data: { items: [{ field_id: "fld_2", name: "状态", is_primary: true }], has_more: false } },
     { code: 0, data: {} },
   ];
@@ -74,8 +74,8 @@ test("lists paginated Base fields and deletes by encoded field id", async () => 
     { fieldId: "fld_2", name: "状态", type: undefined, isPrimary: true },
   ]);
   await client.deleteField("fld/2");
-  assert.match(calls[1].url, /fields\?page_size=200$/);
-  assert.match(calls[2].url, /fields\?page_size=200&page_token=next$/);
+  assert.match(calls[1].url, /fields\?limit=200&offset=0$/);
+  assert.match(calls[2].url, /fields\?limit=200&offset=200$/);
   assert.equal(calls[3].url, "https://example.test/open-apis/base/v3/bases/base%2Ftoken/tables/table/fields/fld%2F2");
   assert.equal(calls[3].init?.method, "DELETE");
 });

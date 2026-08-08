@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 export type ApiRole = "admin" | "ingress";
@@ -6,6 +6,21 @@ export type ApiRole = "admin" | "ingress";
 export interface ApiAuthConfig {
   adminApiKey: string;
   ingressApiKey: string;
+}
+
+export function ingressSignature(rawBody: string, secret: string): string {
+  return `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+}
+
+export function verifyIngressSignature(rawBody: string, presented: string | undefined, secret: string): boolean {
+  if (!secret || !presented) return false;
+  if (!/^sha256=[0-9a-f]{64}$/i.test(presented)) return false;
+  const expected = ingressSignature(rawBody, secret);
+  const actualHex = presented.slice(7).toLowerCase();
+  const actual = Buffer.from(actualHex, "hex");
+  const wanted = Buffer.from(expected.slice(7), "hex");
+  if (actual.toString("hex") !== actualHex) return false;
+  return actual.length === wanted.length && timingSafeEqual(actual, wanted);
 }
 
 export interface AuthResult {
@@ -29,8 +44,7 @@ function presentedKey(request: IncomingMessage): string {
 
 export function authenticateRequest(request: IncomingMessage, role: ApiRole, config: ApiAuthConfig): AuthResult {
   const expected = role === "admin" ? config.adminApiKey : config.ingressApiKey;
-  const actorHeader = request.headers["x-actor-id"];
-  const actorId = (Array.isArray(actorHeader) ? actorHeader[0] : actorHeader) || `${role}-api`;
+  const actorId = role === "admin" ? "admin-api" : "ingress-forwarder";
   return { authenticated: equalSecret(presentedKey(request), expected), actorId };
 }
 

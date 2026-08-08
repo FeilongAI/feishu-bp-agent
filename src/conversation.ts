@@ -1,7 +1,7 @@
 import type { BotReply, ConversationState, IncomingMessage, RequirementDraft, RequirementStore } from "./types.ts";
 import type { BaseFieldAdmin } from "./feishuBase.ts";
 import { createAgentToolRuntime } from "./agentTools.ts";
-import type { McpToolProvider } from "./mcpClient.ts";
+import { isMcpMutationTool, type McpToolProvider } from "./mcpClient.ts";
 import type { AgentClient, ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 
 const PLATFORM_NAMES = ["TikTok", "Meta", "Unity", "AppsFlyer", "AppLovin", "AdMob", "Pangle", "Mintegral"];
@@ -30,7 +30,11 @@ export class ConversationService {
   async handleMessage(message: IncomingMessage): Promise<BotReply> {
     if (message.senderType === "bot") return { text: "" };
 
-    const key = `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
+    // Direct conversations are isolated per requester; a group thread shares its
+    // pending confirmation state so only the original requester can approve it.
+    const key = message.chatType === "group"
+      ? `${message.chatId}:${message.threadId ?? "main"}`
+      : `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
     const conversation = await this.store.getConversation(key) ?? this.newConversation(message, key);
     const text = message.content.trim();
     const ruleCurrentWork = this.isCurrentWorkQuery(text);
@@ -52,6 +56,36 @@ export class ConversationService {
     conversation.recentMessages = [...conversation.recentMessages, message.content].slice(-8);
     conversation.updatedAt = new Date().toISOString();
 
+    // Confirmation is an application-owned security boundary. Resolve it before
+    // invoking the model so a confirmation message cannot trigger a fresh tool call.
+    if (this.isMcpConfirmation(text) && conversation.pendingMcpAction) {
+      const pending = conversation.pendingMcpAction;
+      if (pending.requestedById !== message.senderId) {
+        await this.store.saveConversation(conversation);
+        return { text: "这项飞书操作只能由发起人确认。" };
+      }
+      if (Date.parse(pending.expiresAt) <= Date.now()) {
+        delete conversation.pendingMcpAction;
+        await this.store.saveConversation(conversation);
+        return { text: "这条飞书操作确认已过期，请重新发起操作。" };
+      }
+      if (!this.config.mcp) {
+        await this.store.saveConversation(conversation);
+        return { text: "当前 MCP 服务不可用，未执行任何操作。" };
+      }
+      const result = await this.config.mcp.callTool(pending.toolName, pending.argumentsJson).catch(() => ({ ok: false, error: "mcp_unavailable" }));
+      if (this.mcpResultOk(result)) delete conversation.pendingMcpAction;
+      await this.store.saveConversation(conversation);
+      return this.mcpResultOk(result)
+        ? { text: `已执行飞书操作“${pending.toolName}”。${this.mcpResultText(result)}` }
+        : { text: `飞书操作“${pending.toolName}”执行失败，未完成任何其他操作。请检查权限或稍后重试。` };
+    }
+    if (this.isMcpCancellation(text) && conversation.pendingMcpAction) {
+      delete conversation.pendingMcpAction;
+      await this.store.saveConversation(conversation);
+      return { text: "已取消待确认的飞书操作。" };
+    }
+
     if (!adminQuery && !fieldDelete.requested && !fieldDeleteConfirmation && this.config.agent) {
       const runtime = createAgentToolRuntime({
         message,
@@ -64,9 +98,27 @@ export class ConversationService {
       });
       const mcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
       runtime.definitions.push(...mcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name)));
+      let mcpActionRequested = false;
       const executor = {
         execute: async (name: string, argumentsJson: string) => {
-          if (mcpTools.some((tool) => tool.function.name === name)) return this.config.mcp!.callTool(name, argumentsJson);
+          if (mcpTools.some((tool) => tool.function.name === name)) {
+            if (isMcpMutationTool(name)) {
+              if (!conversation.pendingMcpAction) {
+                conversation.pendingMcpAction = {
+                  toolName: name,
+                  argumentsJson: argumentsJson.slice(0, 20_000),
+                  requestedById: message.senderId,
+                  requestedAt: new Date().toISOString(),
+                  expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+                };
+              }
+              mcpActionRequested = true;
+              await this.store.saveConversation(conversation);
+              const pending = conversation.pendingMcpAction;
+              return { ok: false, confirmationRequired: true, toolName: pending?.toolName || name, expiresInMinutes: 10 };
+            }
+            return this.config.mcp!.callTool(name, argumentsJson);
+          }
           return runtime.executor.execute(name, argumentsJson);
         },
       };
@@ -77,6 +129,10 @@ export class ConversationService {
         senderId: message.senderId,
         senderName: message.senderName,
       }, runtime.definitions, executor).catch(() => undefined);
+      if (mcpActionRequested && conversation.pendingMcpAction) {
+        await this.store.saveConversation(conversation);
+        return { text: `检测到需要执行飞书写操作“${conversation.pendingMcpAction.toolName}”。为避免误操作，请核对请求后回复“确认执行”；如不执行请回复“取消操作”。` };
+      }
       if (agentResult?.usedTools && agentResult.text) {
         await this.store.saveConversation(conversation);
         return { text: agentResult.text };
@@ -238,6 +294,27 @@ export class ConversationService {
 
   private isFieldDeleteConfirmation(text: string): boolean {
     return /^(确认删除|确认执行删除|执行删除|确认)$/i.test(text.trim());
+  }
+
+  private isMcpConfirmation(text: string): boolean {
+    // Keep bare “确认” reserved for the requirement/Base deletion flows.
+    return /^(确认执行|执行操作|确认操作)$/i.test(text.trim());
+  }
+
+  private isMcpCancellation(text: string): boolean {
+    return /^(取消|放弃|不要执行|取消操作)$/.test(text.trim());
+  }
+
+  private mcpResultOk(result: unknown): boolean {
+    return Boolean(result && typeof result === "object" && (result as Record<string, unknown>).ok === true);
+  }
+
+  private mcpResultText(result: unknown): string {
+    if (!result || typeof result !== "object") return "";
+    const value = result as Record<string, unknown>;
+    const content = Array.isArray(value.content) ? value.content : [];
+    const text = content.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text") as Record<string, unknown> | undefined;
+    return typeof text?.text === "string" ? `返回：${text.text.slice(0, 1_000)}` : "";
   }
 
   private parseFieldDeleteRequest(text: string): { requested: boolean; fieldName?: string } {

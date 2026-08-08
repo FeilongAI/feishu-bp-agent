@@ -4,7 +4,9 @@ import { authorizeMessage, type PermissionConfig } from "./permissions.ts";
 import type { BotReply, IncomingMessage, RequirementStore } from "./types.ts";
 
 export function conversationKey(message: IncomingMessage): string {
-  return `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
+  return message.chatType === "group"
+    ? `${message.chatId}:${message.threadId ?? "main"}`
+    : `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
 }
 
 export class MessageProcessor {

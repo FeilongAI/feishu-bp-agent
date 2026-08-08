@@ -94,3 +94,70 @@ test("lets the configured agent answer the Base link query through a tool", asyn
   });
   assert.equal((await service.handleMessage(message("需求多维表格的地址是什么？", "16"))).text, "需求表地址：https://feishu.cn/base/demo");
 });
+
+function mcpFixture() {
+  let calls = 0;
+  const mcp = {
+    async listTools() {
+      return [{
+        type: "function" as const,
+        function: {
+          name: "create-doc",
+          description: "创建飞书文档",
+          parameters: { type: "object", properties: { title: { type: "string" } } },
+        },
+      }];
+    },
+    async callTool() {
+      calls += 1;
+      return { ok: true, content: [{ type: "text", text: "docxcn_demo" }] };
+    },
+    async close() {},
+    get calls() { return calls; },
+  };
+  const agent: AgentClient = {
+    async run(_input, definitions, executor) {
+      assert.ok(definitions.some((item) => item.function.name === "create-doc"));
+      const result = await executor.execute("create-doc", JSON.stringify({ title: "周报" }));
+      return { usedTools: true, text: result && typeof result === "object" && (result as Record<string, unknown>).confirmationRequired ? "文档已创建" : "已处理" };
+    },
+  };
+  return { mcp, agent };
+}
+
+test("holds MCP mutations for requester confirmation and executes once", async () => {
+  const store = new InMemoryRequirementStore();
+  const { mcp, agent } = mcpFixture();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
+  assert.match((await service.handleMessage(message("请创建一篇周报文档", "17"))).text, /核对请求后回复“确认执行”/);
+  assert.equal(mcp.calls, 0);
+  assert.match((await service.handleMessage(message("确认执行", "18"))).text, /已执行飞书操作“create-doc”/);
+  assert.equal(mcp.calls, 1);
+  assert.equal((await store.getConversation("oc_demo:ou_requester:main"))?.pendingMcpAction, undefined);
+});
+
+test("rejects MCP confirmation from another group member and supports cancellation", async () => {
+  const store = new InMemoryRequirementStore();
+  const { mcp, agent } = mcpFixture();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
+  const groupMessage = (content: string, id: string, senderId: string) => ({ ...message(content, id, senderId), chatType: "group" as const });
+  await service.handleMessage(groupMessage("请创建一篇周报文档", "20", "ou_requester"));
+  assert.equal((await service.handleMessage(groupMessage("确认执行", "21", "ou_other"))).text, "这项飞书操作只能由发起人确认。");
+  assert.equal(mcp.calls, 0);
+  assert.equal((await service.handleMessage(groupMessage("取消操作", "22", "ou_requester"))).text, "已取消待确认的飞书操作。");
+  assert.equal(mcp.calls, 0);
+});
+
+test("expires an MCP confirmation without calling the remote tool", async () => {
+  const store = new InMemoryRequirementStore();
+  const { mcp, agent } = mcpFixture();
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
+  await service.handleMessage(message("请创建一篇周报文档", "23"));
+  const conversation = await store.getConversation("oc_demo:ou_requester:main");
+  assert.ok(conversation?.pendingMcpAction);
+  conversation!.pendingMcpAction!.expiresAt = new Date(Date.now() - 1).toISOString();
+  await store.saveConversation(conversation!);
+  assert.equal((await service.handleMessage(message("确认执行", "24"))).text, "这条飞书操作确认已过期，请重新发起操作。");
+  assert.equal(mcp.calls, 0);
+  assert.equal((await store.getConversation("oc_demo:ou_requester:main"))?.pendingMcpAction, undefined);
+});

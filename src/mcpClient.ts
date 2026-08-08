@@ -6,6 +6,9 @@ import type { AgentToolDefinition } from "./understanding.ts";
 export interface McpClientConfig {
   url: string;
   toolAllowlist?: Set<string>;
+  authToken?: string;
+  authType?: "uat" | "tat";
+  allowedTools?: Set<string>;
   maxTools?: number;
   timeoutMs?: number;
 }
@@ -23,11 +26,11 @@ interface McpToolShape {
 }
 
 export function isMcpMutationTool(name: string): boolean {
-  return /(?:^|_)(?:create|delete|update|patch|batch_create|batch_delete|batch_update|send|move|copy|upload|remove|clear)(?:_|$)/i.test(name);
+  return /(?:^|[-_.])(?:create|delete|update|patch|batch[_-]?(?:create|delete|update)|send|move|copy|upload|remove|clear|add)(?:[-_.]|$)/i.test(name);
 }
 
 export class LarkMcpClient implements McpToolProvider {
-  private readonly config: Required<Omit<McpClientConfig, "toolAllowlist">> & { toolAllowlist?: Set<string> };
+  private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools">;
   private readonly logger: Logger;
   private client?: Client;
   private transport?: StreamableHTTPClientTransport;
@@ -39,6 +42,9 @@ export class LarkMcpClient implements McpToolProvider {
     this.config = {
       url: config.url,
       toolAllowlist: config.toolAllowlist,
+      authToken: config.authToken,
+      authType: config.authType,
+      allowedTools: config.allowedTools,
       maxTools: Number.isFinite(config.maxTools) ? Math.max(1, Math.min(Math.trunc(config.maxTools!), 200)) : 80,
       timeoutMs: Number.isFinite(config.timeoutMs) ? Math.max(500, Math.min(Math.trunc(config.timeoutMs!), 60_000)) : 15_000,
     };
@@ -51,14 +57,13 @@ export class LarkMcpClient implements McpToolProvider {
     const result = await this.client!.listTools();
     const allowed = this.config.toolAllowlist;
     this.tools = result.tools
-      .filter((tool) => typeof tool.name === "string" && !isMcpMutationTool(tool.name) && (!allowed || allowed.has(tool.name)))
+      .filter((tool) => typeof tool.name === "string" && (!allowed || allowed.has(tool.name)))
       .slice(0, this.config.maxTools)
       .map((tool) => this.toAgentDefinition(tool as McpToolShape));
     return this.tools;
   }
 
   async callTool(name: string, argumentsJson: string): Promise<unknown> {
-    if (isMcpMutationTool(name)) return { ok: false, error: "mcp_mutation_requires_application_confirmation" };
     const tools = await this.listTools();
     if (!tools.some((tool) => tool.function.name === name)) return { ok: false, error: "mcp_tool_not_allowlisted" };
     let args: unknown = {};
@@ -85,7 +90,12 @@ export class LarkMcpClient implements McpToolProvider {
     this.connecting = (async () => {
       const client = new Client({ name: "feishu-bp-agent", version: "0.1.0" });
       const transport = new StreamableHTTPClientTransport(new URL(this.config.url), {
-        fetch: async (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(this.config.timeoutMs) }),
+        fetch: async (url, init) => {
+          const headers = new Headers(init?.headers);
+          if (this.config.authToken && this.config.authType) headers.set(`X-Lark-MCP-${this.config.authType.toUpperCase()}`, this.config.authToken);
+          if (this.config.allowedTools?.size) headers.set("X-Lark-MCP-Allowed-Tools", [...this.config.allowedTools].join(","));
+          return fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.config.timeoutMs) });
+        },
       });
       transport.onerror = (error) => this.logger.warn("mcp_transport_error", { reason: error.name });
       await client.connect(transport);

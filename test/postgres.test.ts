@@ -18,6 +18,13 @@ test("persists pending Base field deletion state in the conversation row", async
       requestedAt: "2026-08-08T01:00:00.000Z",
       expiresAt: "2026-08-08T01:10:00.000Z",
     },
+    pending_mcp_action: {
+      toolName: "create-doc",
+      argumentsJson: "{\"title\":\"周报\"}",
+      requestedById: "ou_owner",
+      requestedAt: "2026-08-08T01:00:00.000Z",
+      expiresAt: "2026-08-08T01:10:00.000Z",
+    },
     recent_messages: ["删除需求表的列：负责人"],
     updated_at: "2026-08-08T01:00:00.000Z",
   };
@@ -37,12 +44,15 @@ test("persists pending Base field deletion state in the conversation row", async
     senderName: row.sender_name,
     draft: undefined,
     pendingBaseFieldDelete: row.pending_base_field_delete,
+    pendingMcpAction: row.pending_mcp_action,
     recentMessages: row.recent_messages,
     updatedAt: row.updated_at,
   });
   const insert = calls[0];
   assert.match(insert.sql, /pending_base_field_delete/);
   assert.deepEqual(JSON.parse(String(insert.values?.[6])), row.pending_base_field_delete);
+  assert.deepEqual(JSON.parse(String(insert.values?.[7])), row.pending_mcp_action);
   const restored = await store.getConversation(row.conversation_key);
   assert.deepEqual(restored?.pendingBaseFieldDelete, row.pending_base_field_delete);
+  assert.deepEqual(restored?.pendingMcpAction, row.pending_mcp_action);
 });

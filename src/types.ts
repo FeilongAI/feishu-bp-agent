@@ -54,6 +54,7 @@ export interface ConversationState {
   threadId?: string;
   draft?: RequirementDraft;
   pendingBaseFieldDelete?: PendingBaseFieldDelete;
+  pendingMcpAction?: PendingMcpAction;
   recentMessages: string[];
   updatedAt: string;
 }
@@ -61,6 +62,14 @@ export interface ConversationState {
 export interface PendingBaseFieldDelete {
   fieldId: string;
   fieldName: string;
+  requestedById: string;
+  requestedAt: string;
+  expiresAt: string;
+}
+
+export interface PendingMcpAction {
+  toolName: string;
+  argumentsJson: string;
   requestedById: string;
   requestedAt: string;
   expiresAt: string;

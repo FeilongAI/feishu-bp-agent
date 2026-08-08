@@ -39,25 +39,36 @@ The provider must implement `POST /chat/completions` and JSON object response mo
 
 When agent mode is enabled, the model can call only the allowlisted BP tools for the requirement Base link, administrator identity, current work, the sender's own requirements, and Base fields. The service executes tools and sends the results back to the model. It does not expose arbitrary shell commands or Feishu API paths to the model.
 
-## Official Lark MCP bridge
+## Official remote Lark MCP bridge
 
-The repository includes an optional `lark-mcp` Compose profile. It runs the official `@larksuiteoapi/lark-mcp` package in streamable HTTP mode and keeps its Feishu credentials in the MCP container:
+The preferred integration uses Feishu's official remote MCP endpoint. It dynamically lists and calls the tools allowed by the request headers; no Feishu tool schema is hard-coded in this service:
 
 ```dotenv
 MCP_ENABLED=true
-MCP_URL=http://lark-mcp:3000/mcp
-MCP_TOOL_ALLOWLIST=bitable_v1_app_get,bitable_v1_app_table_list,bitable_v1_app_table_field_list,docx_v1_document_raw_content_get
-MCP_LARK_TOOLS=bitable.v1.app.get,bitable.v1.appTable.list,bitable.v1.appTableField.list,docx.v1.document.rawContent.get
+MCP_URL=https://mcp.feishu.cn/mcp
+MCP_TAT=t-gxxxxxxxxxxxxxxxxxxxxx
+MCP_ALLOWED_TOOLS=search-user,get-user,fetch-file,search-doc,create-doc,fetch-doc,update-doc,list-docs,get-comments,add-comments
+MCP_TOOL_ALLOWLIST=search-user,get-user,fetch-file,search-doc,create-doc,fetch-doc,update-doc,list-docs,get-comments,add-comments
 ```
 
-Build and start the profile together with the core services:
+`MCP_TAT` uses application identity. Use `MCP_UAT` when the tools must act as a specific user. Request only the permissions required by the selected tools. The remote service currently documents cloud-document tools; field and record operations in Base are not part of this remote endpoint yet.
+
+The two tool lists serve different boundaries: `MCP_ALLOWED_TOOLS` is sent to Feishu in `X-Lark-MCP-Allowed-Tools`, while `MCP_TOOL_ALLOWLIST` is enforced again by this service after `tools/list`. Keep both lists identical and use the exact hyphenated names from the remote MCP documentation. Read-only tools can run immediately. Tools whose names indicate a mutation (for example `create-doc` or `update-doc`) are intercepted by the service; the requester must reply `确认执行` (or `取消操作`) within 10 minutes before the remote `tools/call` is sent.
+
+For Base or other tool domains, the repository also includes an optional local `lark-mcp` Compose profile. It runs the official `@larksuiteoapi/lark-mcp` package in streamable HTTP mode and keeps its Feishu credentials in the MCP container:
+
+```dotenv
+MCP_URL=http://lark-mcp:3000/mcp
+MCP_TAT=
+MCP_UAT=
+```
 
 ```bash
 docker compose --profile mcp build
 docker compose --profile mcp up -d
 ```
 
-The MCP server exposes only the tools named by `MCP_LARK_TOOLS`; the core client applies a second `MCP_TOOL_ALLOWLIST` filter and removes mutating tool names (`create`, `delete`, `update`, `patch`, `send`, and similar) before exposing them to the model. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
+The local profile exposes only the tools named by `MCP_LARK_TOOLS`; the core client applies a second `MCP_TOOL_ALLOWLIST` filter. Any MCP tool whose name indicates a mutation is held for application-level confirmation before execution. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
 
 ## 2. Build and run against an existing PostgreSQL
 

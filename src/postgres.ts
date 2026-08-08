@@ -68,6 +68,7 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
       threadId: row.thread_id ? String(row.thread_id) : undefined,
       draft: row.draft as ConversationState["draft"],
       pendingBaseFieldDelete: row.pending_base_field_delete as ConversationState["pendingBaseFieldDelete"],
+      pendingMcpAction: row.pending_mcp_action as ConversationState["pendingMcpAction"],
       recentMessages: Array.isArray(row.recent_messages) ? row.recent_messages.map(String) : [],
       updatedAt: new Date(String(row.updated_at)).toISOString(),
     };
@@ -75,11 +76,11 @@ export class PostgresRequirementStore implements RequirementStore, BaseOutboxSto
 
   async saveConversation(conversation: ConversationState): Promise<void> {
     await this.db.query(
-      `INSERT INTO bp_conversation (conversation_key, chat_id, sender_id, sender_name, thread_id, draft, pending_base_field_delete, recent_messages, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9)
+      `INSERT INTO bp_conversation (conversation_key, chat_id, sender_id, sender_name, thread_id, draft, pending_base_field_delete, pending_mcp_action, recent_messages, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10)
        ON CONFLICT (conversation_key) DO UPDATE SET sender_name=EXCLUDED.sender_name, draft=EXCLUDED.draft,
-       pending_base_field_delete=EXCLUDED.pending_base_field_delete, recent_messages=EXCLUDED.recent_messages, updated_at=EXCLUDED.updated_at`,
-      [conversation.key, conversation.chatId, conversation.senderId, conversation.senderName ?? null, conversation.threadId ?? null, JSON.stringify(conversation.draft ?? null), JSON.stringify(conversation.pendingBaseFieldDelete ?? null), JSON.stringify(conversation.recentMessages), conversation.updatedAt],
+       pending_base_field_delete=EXCLUDED.pending_base_field_delete, pending_mcp_action=EXCLUDED.pending_mcp_action, recent_messages=EXCLUDED.recent_messages, updated_at=EXCLUDED.updated_at`,
+      [conversation.key, conversation.chatId, conversation.senderId, conversation.senderName ?? null, conversation.threadId ?? null, JSON.stringify(conversation.draft ?? null), JSON.stringify(conversation.pendingBaseFieldDelete ?? null), JSON.stringify(conversation.pendingMcpAction ?? null), JSON.stringify(conversation.recentMessages), conversation.updatedAt],
     );
   }
 

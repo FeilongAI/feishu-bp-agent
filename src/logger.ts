@@ -2,10 +2,15 @@ const SENSITIVE_KEY = /(authorization|cookie|password|secret|token|api[-_]?key|c
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const URL_PASSWORD = /(\w+:\/\/[^:\s/]+:)[^@\s/]+(@)/g;
 const URL_QUERY_SECRET = /([?&](?:access_token|api[-_]?key|token|secret|password|credential)=)[^&#\s]*/gi;
+const INLINE_SECRET = /((?:^|[\s,{])["']?(?:tenant[-_]?access[-_]?token|user[-_]?access[-_]?token|access[-_]?token|refresh[-_]?token|app[-_]?secret|client[-_]?secret|private[-_]?key|api[-_]?key|password|credential)["']?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;]+)/gi;
 
 export function redact(value: unknown, key = ""): unknown {
   if (SENSITIVE_KEY.test(key)) return "[REDACTED]";
-  if (typeof value === "string") return value.replace(BEARER, "Bearer [REDACTED]").replace(URL_PASSWORD, "$1[REDACTED]$2").replace(URL_QUERY_SECRET, "$1[REDACTED]");
+  if (typeof value === "string") return value
+    .replace(BEARER, "Bearer [REDACTED]")
+    .replace(URL_PASSWORD, "$1[REDACTED]$2")
+    .replace(URL_QUERY_SECRET, "$1[REDACTED]")
+    .replace(INLINE_SECRET, "$1[REDACTED]");
   if (Array.isArray(value)) return value.map((item) => redact(item));
   if (value && typeof value === "object") {
     if (value instanceof Error) return { name: value.name, message: redact(value.message), stack: redact(value.stack) };

@@ -65,6 +65,21 @@ test("falls back to open_id when contact lookup fails", async () => {
   assert.equal((await directory.enrich(message)).senderName, undefined);
 });
 
+test("bounds the forwarder sender-name cache with LRU eviction", async () => {
+  let calls = 0;
+  const directory = new LarkCliSenderDirectory("lark-cli-test", async () => {
+    calls += 1;
+    return { code: 0, stdout: JSON.stringify({ data: { user: { name: "用户" } } }), stderr: "" };
+  }, 86_400_000, 2);
+  const lookup = (senderId: string, messageId: string) => directory.enrich({ chatId: "oc_demo", senderId, messageId, content: "hello" });
+  await lookup("ou_a", "om_cache_a1");
+  await lookup("ou_b", "om_cache_b1");
+  await lookup("ou_a", "om_cache_a2");
+  await lookup("ou_c", "om_cache_c1");
+  await lookup("ou_b", "om_cache_b2");
+  assert.equal(calls, 4);
+});
+
 test("spools before delivery and replays after a transient failure", async () => {
   const directory = await mkdtemp(join(tmpdir(), "bp-forwarder-"));
   try {

@@ -15,17 +15,25 @@ interface CacheEntry {
 interface SenderDirectoryConfig {
   cacheTtlMs?: number;
   negativeCacheTtlMs?: number;
+  maxCacheEntries?: number;
+  maxConcurrentLookups?: number;
+  toolName?: string;
 }
 
-const SUPPORTED_TOOL_NAMES = new Set([
+const SUPPORTED_TOOL_NAMES = [
   "contact_v3_user_get",
   "contact_user_get",
   "get_user",
-]);
+] as const;
 
 function boundedDuration(value: number | undefined, fallback: number, maximum: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.max(1_000, Math.min(Math.trunc(value!), maximum));
+}
+
+function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(Math.trunc(value!), maximum));
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -36,8 +44,37 @@ function normalizedToolName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-function findContactTool(tools: AgentToolDefinition[]): AgentToolDefinition | undefined {
-  return tools.find((tool) => SUPPORTED_TOOL_NAMES.has(normalizedToolName(tool.function.name)));
+function findContactTool(tools: AgentToolDefinition[], configuredName?: string): AgentToolDefinition | undefined {
+  if (configuredName?.trim()) {
+    const configured = normalizedToolName(configuredName);
+    return tools.find((tool) => tool.function.name === configuredName || normalizedToolName(tool.function.name) === configured);
+  }
+  for (const supported of SUPPORTED_TOOL_NAMES) {
+    const match = tools.find((tool) => normalizedToolName(tool.function.name) === supported);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+class AsyncLimiter {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+  private readonly maximum: number;
+
+  constructor(maximum: number) {
+    this.maximum = maximum;
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.active >= this.maximum) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active += 1;
+    try {
+      return await operation();
+    } finally {
+      this.active -= 1;
+      this.waiting.shift()?.();
+    }
+  }
 }
 
 function schemaProperties(schema: unknown): Record<string, unknown> {
@@ -174,6 +211,9 @@ export class McpSenderDirectory implements SenderDirectory {
   private readonly logger: Logger;
   private readonly cacheTtlMs: number;
   private readonly negativeCacheTtlMs: number;
+  private readonly maxCacheEntries: number;
+  private readonly toolName?: string;
+  private readonly limiter: AsyncLimiter;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly inFlight = new Map<string, Promise<string | undefined>>();
 
@@ -182,17 +222,20 @@ export class McpSenderDirectory implements SenderDirectory {
     this.logger = logger;
     this.cacheTtlMs = boundedDuration(config.cacheTtlMs, 86_400_000, 30 * 86_400_000);
     this.negativeCacheTtlMs = boundedDuration(config.negativeCacheTtlMs, 300_000, 3_600_000);
+    this.maxCacheEntries = boundedInteger(config.maxCacheEntries, 10_000, 100_000);
+    this.toolName = config.toolName?.trim() || undefined;
+    this.limiter = new AsyncLimiter(boundedInteger(config.maxConcurrentLookups, 8, 100));
   }
 
   async enrich(message: IncomingMessage): Promise<IncomingMessage> {
     if (message.senderName || !message.senderId) return message;
     const now = Date.now();
-    const cached = this.cache.get(message.senderId);
-    if (cached && cached.expiresAt > now) return cached.name ? { ...message, senderName: cached.name } : message;
+    const cached = this.cached(message.senderId, now);
+    if (cached) return cached.name ? { ...message, senderName: cached.name } : message;
 
     let lookup = this.inFlight.get(message.senderId);
     if (!lookup) {
-      lookup = this.lookup(message.senderId);
+      lookup = this.limiter.run(() => this.lookup(message.senderId));
       this.inFlight.set(message.senderId, lookup);
     }
     let name: string | undefined;
@@ -201,13 +244,37 @@ export class McpSenderDirectory implements SenderDirectory {
     } finally {
       if (this.inFlight.get(message.senderId) === lookup) this.inFlight.delete(message.senderId);
     }
-    this.cache.set(message.senderId, { name, expiresAt: Date.now() + (name ? this.cacheTtlMs : this.negativeCacheTtlMs) });
+    this.storeCache(message.senderId, { name, expiresAt: Date.now() + (name ? this.cacheTtlMs : this.negativeCacheTtlMs) });
     return name ? { ...message, senderName: name } : message;
+  }
+
+  private cached(senderId: string, now: number): CacheEntry | undefined {
+    const cached = this.cache.get(senderId);
+    if (!cached) return undefined;
+    if (cached.expiresAt <= now) {
+      this.cache.delete(senderId);
+      return undefined;
+    }
+    this.cache.delete(senderId);
+    this.cache.set(senderId, cached);
+    return cached;
+  }
+
+  private storeCache(senderId: string, entry: CacheEntry): void {
+    const now = Date.now();
+    for (const [key, cached] of this.cache) if (cached.expiresAt <= now) this.cache.delete(key);
+    this.cache.delete(senderId);
+    while (this.cache.size >= this.maxCacheEntries) {
+      const oldest = this.cache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+    }
+    this.cache.set(senderId, entry);
   }
 
   private async lookup(senderId: string): Promise<string | undefined> {
     try {
-      const tool = findContactTool(await this.provider.listTools());
+      const tool = findContactTool(await this.provider.listTools(), this.toolName);
       if (!tool) {
         this.logger.warn("sender_name_lookup_skipped", { reason: "contact_tool_not_exposed" });
         return undefined;

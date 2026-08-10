@@ -27,7 +27,12 @@ const delivery = new EventDeliveryService(
     maxRetries: numberEnv("FORWARDER_MAX_RETRIES", 5, 0, 10),
     retryBaseMs: numberEnv("FORWARDER_RETRY_BASE_MS", 500, 10, 30_000),
   },
-  new LarkCliSenderDirectory(bin),
+  new LarkCliSenderDirectory(
+    bin,
+    undefined,
+    numberEnv("SENDER_NAME_CACHE_TTL_MS", 86_400_000, 60_000, 30 * 86_400_000),
+    numberEnv("SENDER_NAME_CACHE_MAX_ENTRIES", 10_000, 1, 100_000),
+  ),
 );
 
 const state: { ready: boolean; startedAt: string; connectedAt?: string; lastEventAt?: string; restarts: number } = {

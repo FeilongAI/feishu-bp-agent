@@ -109,6 +109,9 @@ const senderDirectory = mcp
   ? new McpSenderDirectory(mcp, logger, {
     cacheTtlMs: Number(process.env.SENDER_NAME_CACHE_TTL_MS || 86_400_000),
     negativeCacheTtlMs: Number(process.env.SENDER_NAME_NEGATIVE_CACHE_TTL_MS || 300_000),
+    maxCacheEntries: Number(process.env.SENDER_NAME_CACHE_MAX_ENTRIES || 10_000),
+    maxConcurrentLookups: Number(process.env.SENDER_NAME_MAX_CONCURRENT_LOOKUPS || 8),
+    toolName: process.env.SENDER_NAME_MCP_TOOL,
   })
   : undefined;
 const processor = new MessageProcessor(store, service, {
@@ -145,7 +148,12 @@ if (process.env.RUN_LARK_CONSUMER === "true") {
     new LarkCliReplySender(process.env.LARK_CLI_BIN || "lark-cli"),
     logger,
     { maxRetries: Number(process.env.FORWARDER_MAX_RETRIES || 5), retryBaseMs: Number(process.env.FORWARDER_RETRY_BASE_MS || 500) },
-    new LarkCliSenderDirectory(process.env.LARK_CLI_BIN || "lark-cli"),
+    new LarkCliSenderDirectory(
+      process.env.LARK_CLI_BIN || "lark-cli",
+      undefined,
+      Number(process.env.SENDER_NAME_CACHE_TTL_MS || 86_400_000),
+      Number(process.env.SENDER_NAME_CACHE_MAX_ENTRIES || 10_000),
+    ),
   );
   let replaying = false;
   const replay = async () => {

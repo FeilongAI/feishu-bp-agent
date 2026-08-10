@@ -27,6 +27,45 @@ test("answers current work and requester requirements", async () => {
   assert.match((await service.handleMessage(message("我的需求", "7"))).text, /APP 营收核对/);
 });
 
+test("filters current work by requirement visibility", async () => {
+  const store = new InMemoryRequirementStore();
+  const requirement = (title: string, requesterId: string, visibility: "public" | "requester" | "private", sourceMessageId: string) => store.createRequirement({
+    title, goal: "目标", scope: "范围", acceptanceCriteria: "验收", requesterId, platforms: [], status: "进行中" as const,
+    ownerId: "ou_owner", ownerName: "韩飞龙", progress: "处理中", visibility, sourceChatId: "oc_demo", sourceMessageId,
+  });
+  await requirement("公开需求", "ou_other", "public", "om_public");
+  await requirement("仅提出人需求", "ou_viewer", "requester", "om_requester");
+  await requirement("其他提出人需求", "ou_other", "requester", "om_other");
+  await requirement("管理员私密需求", "ou_viewer", "private", "om_private");
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
+
+  const viewerReply = (await service.handleMessage(message("你现在在做什么", "visibility-1", "ou_viewer"))).text;
+  assert.match(viewerReply, /公开需求/);
+  assert.match(viewerReply, /仅提出人需求/);
+  assert.doesNotMatch(viewerReply, /其他提出人需求|管理员私密需求/);
+  const ownerReply = (await service.handleMessage(message("你现在在做什么", "visibility-2", "ou_owner"))).text;
+  assert.match(ownerReply, /公开需求/);
+  assert.match(ownerReply, /仅提出人需求/);
+  assert.match(ownerReply, /其他提出人需求/);
+  assert.match(ownerReply, /管理员私密需求/);
+});
+
+test("applies visibility filtering inside the agent current-work tool", async () => {
+  const store = new InMemoryRequirementStore();
+  await store.createRequirement({ title: "公开事项", goal: "目标", scope: "范围", acceptanceCriteria: "验收", requesterId: "ou_other", platforms: [], status: "进行中", ownerId: "ou_owner", visibility: "public", sourceChatId: "oc_demo", sourceMessageId: "om_visible" });
+  await store.createRequirement({ title: "机密事项", goal: "目标", scope: "范围", acceptanceCriteria: "验收", requesterId: "ou_other", platforms: [], status: "进行中", ownerId: "ou_owner", visibility: "private", sourceChatId: "oc_demo", sourceMessageId: "om_private" });
+  let toolResult: unknown;
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      toolResult = await executor.execute("list_current_work", "{}");
+      return { usedTools: true, text: "已查询" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  await service.handleMessage(message("你现在在做什么", "visibility-agent", "ou_viewer"));
+  assert.deepEqual((toolResult as { items: Array<{ title: string }> }).items.map((item) => item.title), ["公开事项"]);
+});
+
 test("treats a concise new requirement as a draft and normalizes AppsFlyer aliases", async () => {
   const store = new InMemoryRequirementStore();
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
@@ -237,6 +276,46 @@ test("does not let another group member edit or submit a requirement draft", asy
   assert.match((await service.handleMessage(groupMessage("确认提交", "27", "ou_other"))).text, /只有发起人/);
   assert.equal((await store.listRequirements()).length, 0);
   assert.match((await service.handleMessage(groupMessage("取消当前需求", "28", "ou_other"))).text, /只有发起人/);
+});
+
+test("enforces draft ownership inside the agent save tool", async () => {
+  const store = new InMemoryRequirementStore();
+  const groupKey = "oc_demo:main";
+  await store.saveConversation({
+    key: groupKey, chatId: "oc_demo", senderId: "ou_requester", recentMessages: [], updatedAt: new Date().toISOString(),
+    draft: { id: "DRAFT-owned", conversationKey: groupKey, requesterId: "ou_requester", requesterName: "甲", title: "甲的需求", state: "collecting", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  });
+  let toolResult: unknown;
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      toolResult = await executor.execute("save_requirement_draft", JSON.stringify({ title: "被覆盖的需求" }));
+      return { usedTools: true, text: "已覆盖" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  await service.handleMessage({ ...message("当前工作是什么，同时记录这个需求", "owner-tool", "ou_other"), chatType: "group" });
+
+  assert.deepEqual(toolResult, { ok: false, error: "draft_owned_by_other" });
+  assert.equal((await store.getConversation(groupKey))?.draft?.requesterId, "ou_requester");
+  assert.equal((await store.getConversation(groupKey))?.draft?.title, "甲的需求");
+});
+
+test("keeps an existing requester name when enrichment is temporarily unavailable", async () => {
+  const store = new InMemoryRequirementStore();
+  const key = "oc_demo:ou_requester:main";
+  await store.saveConversation({
+    key, chatId: "oc_demo", senderId: "ou_requester", senderName: "甲", recentMessages: [], updatedAt: new Date().toISOString(),
+    draft: { id: "DRAFT-name", conversationKey: key, requesterId: "ou_requester", requesterName: "甲", title: "已有需求", state: "collecting", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  });
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      await executor.execute("save_requirement_draft", JSON.stringify({ scope: "补充范围" }));
+      return { usedTools: true, text: "已补充" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  await service.handleMessage(message("补充范围", "keep-name"));
+  assert.equal((await store.getConversation(key))?.draft?.requesterName, "甲");
 });
 
 test("expires an MCP confirmation without calling the remote tool", async () => {

@@ -97,10 +97,9 @@ export class LarkCliClient implements LarkClient {
   reply(messageId: string, text: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.bin, ["im", "+messages-reply", "--message-id", messageId, "--text", text, "--as", "bot", "--idempotency-key", `bp-agent-${messageId}`], { stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
-      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      child.stderr.resume();
       child.on("error", reject);
-      child.on("close", (code) => code === 0 ? resolve() : reject(new Error(stderr || `lark reply exited with ${code}`)));
+      child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`lark_reply_failed:exit_${code ?? "unknown"}`)));
     });
   }
 }

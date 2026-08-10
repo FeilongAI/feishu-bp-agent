@@ -44,6 +44,8 @@ FEISHU_APP_ID=飞书应用ID
 FEISHU_APP_SECRET=飞书应用密钥
 ```
 
+飞书应用还需要开通 `contact:user.base:readonly`，发布并审批包含该权限的新版本，同时确保应用通讯录可见范围包含所有允许使用智能体的人。默认部署由 forwarder 使用 Bot 身份按消息中的 `open_id` 查询姓名；即使不启用 MCP，这些权限和可见范围也必须配置。
+
 密钥只放在服务器 `.env` 中，不要提交到 Git。`POSTGRES_PASSWORD` 建议只使用字母、数字和下划线。
 
 校验、构建和启动：
@@ -63,7 +65,7 @@ docker compose ps
 docker compose logs --tail=100 feishu-bp-agent
 docker compose logs --tail=100 feishu-bp-forwarder
 curl --fail http://127.0.0.1:8090/healthz
-curl --fail http://127.0.0.1:8091/healthz
+docker exec feishu-bp-forwarder wget -qO- http://127.0.0.1:8091/healthz
 ```
 
 转发器启动时会自动使用 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 初始化 `lark-cli`。
@@ -80,14 +82,14 @@ docker compose ps
 docker compose logs --tail=200 feishu-bp-agent
 docker compose logs --tail=200 feishu-bp-forwarder
 curl --fail http://127.0.0.1:8090/healthz
-curl --fail http://127.0.0.1:8091/healthz
+docker exec feishu-bp-forwarder wget -qO- http://127.0.0.1:8091/healthz
 ```
 
 如果 `git status` 显示服务器有本地修改，先备份并处理后再拉取。`docker compose up -d` 会重建需要更新的容器，但保留 PostgreSQL 数据卷。
 
 ## 启用本地 MCP
 
-在 `.env` 中设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`，并配置 `MCP_TOOL_ALLOWLIST` 和 `MCP_LARK_TOOLS`。然后执行：
+在 `.env` 中设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`、`MCP_ALLOWED_TOOLS=`，并配置 `MCP_TOOL_ALLOWLIST` 和 `MCP_LARK_TOOLS`。`MCP_ALLOWED_TOOLS` 请求头用于官方远程 MCP，本地 profile 依靠 `MCP_LARK_TOOLS` 和核心 allowlist 控制工具。然后执行：
 
 ```bash
 docker compose --profile mcp build
@@ -96,7 +98,7 @@ docker compose --profile mcp up -d
 
 MCP 写操作会要求发起人回复“确认执行”；取消时回复“取消操作”。`lark-mcp` 容器以非 root 用户运行。
 
-如需通过 `open_id` 自动补全私聊发送者姓名，请确保 `MCP_LARK_TOOLS` 包含 `contact.v3.user.get`；如果配置了 `MCP_TOOL_ALLOWLIST`，也要把该工具加入白名单。飞书应用需要开通 `contact:user.base:readonly`，重新发布/审批应用版本，并把对应用户纳入应用通讯录可见范围。配置修改后需要重建并重启 `lark-mcp` 与核心服务。
+如需让核心服务也通过 MCP 按 `open_id` 补全姓名，请确保 `MCP_LARK_TOOLS` 包含点号形式的 API 标识 `contact.v3.user.get`；如果配置了 `MCP_TOOL_ALLOWLIST`，其中必须填写 MCP 实际暴露的 snake 工具名 `contact_v3_user_get`。可设置 `SENDER_NAME_MCP_TOOL=contact_v3_user_get` 固定工具选择。配置修改后需要重建并重启 `lark-mcp` 与核心服务。
 
 ## 常用运维命令
 
@@ -115,7 +117,7 @@ docker compose up -d
 
 核心服务失败时查看 `docker compose logs feishu-bp-agent`，重点检查数据库连接、三个 API 密钥和 `INGRESS_EVENT_SECRET`。转发器失败时查看 `docker compose logs feishu-bp-forwarder`，重点检查飞书应用凭据、`im.message.receive_v1` 订阅、机器人可见范围，以及两个服务的 ingress 配置是否一致。
 
-如果健康检查通过但没有回复，分别检查 `8090` 和 `8091`，再查看转发器日志中的 `pending`。群聊还要确认消息明确 `@` 了机器人。
+如果健康检查通过但没有回复，请检查核心服务 `8090`，并通过 `docker exec feishu-bp-forwarder wget -qO- http://127.0.0.1:8091/healthz` 检查转发器，再查看转发器日志中的 `pending`。群聊还要确认消息明确 `@` 了机器人。
 
 如果数据消失，先检查是否误执行了 `docker compose down -v`，以及是否因为更换 Compose 项目名使用了新数据卷：
 
@@ -130,6 +132,6 @@ docker compose config | grep -A3 volumes
 
 - `.env` 权限保持为 `600`。
 - 不要把 API Key、App Secret、TAT/UAT 提交到 Git。
-- 8090 和 8091 只监听本机或内网。
+- 核心服务 8090 只映射到宿主机回环地址；forwarder 的 8091 不映射到宿主机，只能从容器内检查。
 - `/api/messages` 必须同时使用 `INGRESS_API_KEY` 和 `INGRESS_EVENT_SECRET`。
 - `feishu-bp-forwarder` 只运行一个实例，避免重复消费飞书事件。

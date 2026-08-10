@@ -3,6 +3,7 @@ import type { BaseFieldAdmin } from "./feishuBase.ts";
 import { createAgentToolRuntime } from "./agentTools.ts";
 import { isMcpMutationTool, type McpToolProvider } from "./mcpClient.ts";
 import type { AgentClient, ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
+import { canViewRequirement } from "./requirementVisibility.ts";
 
 const PLATFORM_ALIASES: Record<string, string[]> = {
   TikTok: ["tiktok", "tiktok ads"],
@@ -300,7 +301,7 @@ export class ConversationService {
 
     if (analysis?.intent === "current_work_query" || ruleCurrentWork) {
       await this.store.saveConversation(conversation);
-      return { text: await this.currentWorkReply() };
+      return { text: await this.currentWorkReply(message.senderId) };
     }
     if (analysis?.intent === "my_requirements_query" || ruleMyRequirements) {
       await this.store.saveConversation(conversation);
@@ -484,14 +485,16 @@ export class ConversationService {
     return ["我整理了这条需求：", `- 标题：${draft.title}`, `- 目标：${draft.goal}`, `- 范围：${draft.scope}`, `- 平台：${draft.platforms?.join("、") || "待补充"}`, `- 验收标准：${draft.acceptanceCriteria}`, `- 期望时间：${draft.desiredDate || "未提供"}`, `- 优先级：${draft.priority || "待评估"}`].join("\n");
   }
 
-  private async currentWorkReply(): Promise<string> {
-    const active = (await this.store.listRequirements({ status: "进行中" })).filter((item) => item.ownerId === this.config.ownerId);
+  private async currentWorkReply(viewerId: string): Promise<string> {
+    const active = (await this.store.listRequirements({ status: "进行中" }))
+      .filter((item) => item.ownerId === this.config.ownerId && canViewRequirement(item, viewerId, this.config.ownerId));
     if (!active.length) return `${this.config.ownerName} 当前没有标记为“进行中”的需求。`;
     return [`${this.config.ownerName} 当前正在处理：`, ...active.slice(0, 5).map((item) => `- ${item.id} ${item.title}${item.progress ? `：${item.progress}` : ""}`)].join("\n");
   }
 
   private async myRequirementsReply(requesterId: string): Promise<string> {
-    const items = await this.store.listRequirements({ requesterId });
+    const items = (await this.store.listRequirements({ requesterId }))
+      .filter((item) => canViewRequirement(item, requesterId, this.config.ownerId));
     if (!items.length) return "还没有查到你提交的需求。可以直接告诉我想解决什么问题。";
     return ["你提交的需求：", ...items.slice(0, 10).map((item) => `- ${item.id} ${item.title}：${item.status}${item.desiredDate ? `，期望 ${item.desiredDate}` : ""}`)].join("\n");
   }

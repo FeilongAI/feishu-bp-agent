@@ -7,6 +7,7 @@ import { redact, type Logger } from "../src/logger.ts";
 import { MessageProcessor } from "../src/messageProcessor.ts";
 import { InMemoryRequirementStore } from "../src/store.ts";
 import type { ConversationState, IncomingMessage } from "../src/types.ts";
+import type { SenderDirectory } from "../src/senderDirectory.ts";
 
 const silentLogger: Logger = { info() {}, warn() {}, error() {} };
 const permissions = {
@@ -64,6 +65,39 @@ test("serializes concurrent messages in the same conversation", async () => {
   assert.deepEqual(state?.recentMessages, ["我想做 Meta 看板", "目标是分析每天消耗"]);
 });
 
+test("does not let sender-name lookup latency reorder group messages", async () => {
+  const store = new InMemoryRequirementStore();
+  const directory: SenderDirectory = {
+    async enrich(value) {
+      if (value.senderId === "ou_first") await new Promise((resolve) => setTimeout(resolve, 30));
+      return { ...value, senderName: value.senderId === "ou_first" ? "甲" : "乙" };
+    },
+  };
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), { ...permissions, groupRequireMention: false }, silentLogger, directory);
+  const group = (senderId: string, id: string, content: string): IncomingMessage => ({ ...message(content, id), senderId, chatType: "group" });
+
+  const first = processor.process(group("ou_first", "order-1", "我想做第一个 Meta 看板"));
+  await Promise.resolve();
+  const second = processor.process(group("ou_second", "order-2", "我想做第二个 Meta 看板"));
+  await Promise.all([first, second]);
+
+  const state = await store.getConversation("oc_demo:main");
+  assert.equal(state?.draft?.requesterId, "ou_first");
+  assert.equal(state?.draft?.requesterName, "甲");
+  assert.match(state?.draft?.title || "", /第一个/);
+});
+
+test("claims duplicate messages before resolving sender names", async () => {
+  const store = new InMemoryRequirementStore();
+  let lookups = 0;
+  const directory: SenderDirectory = { async enrich(value) { lookups += 1; return { ...value, senderName: "甲" }; } };
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), permissions, silentLogger, directory);
+  const first = await processor.process(message("我想做 Meta 看板", "lookup-dedupe"));
+  const duplicate = await processor.process(message("我想做 Meta 看板", "lookup-dedupe"));
+  assert.deepEqual(duplicate, first);
+  assert.equal(lookups, 1);
+});
+
 test("silently rejects unmentioned group messages and enforces allowlists", async () => {
   const store = new InMemoryRequirementStore();
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" });
@@ -112,4 +146,7 @@ test("redacts nested secrets, bearer values, and URL passwords", () => {
     authorization: "[REDACTED]",
     nested: { appSecret: "[REDACTED]", note: "Bearer [REDACTED]", url: "postgresql://user:[REDACTED]@db/app?token=[REDACTED]&x=1" },
   });
+  assert.equal(redact("tenant_access_token=t-secret app_secret=very-secret"), "tenant_access_token=[REDACTED] app_secret=[REDACTED]");
+  assert.equal(redact("tenantAccessToken=t-secret appSecret=very-secret"), "tenantAccessToken=[REDACTED] appSecret=[REDACTED]");
+  assert.equal(redact('{"user_access_token":"u-secret","client_secret":"c-secret"}'), '{"user_access_token":[REDACTED],"client_secret":[REDACTED]}');
 });

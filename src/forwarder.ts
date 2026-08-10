@@ -153,21 +153,34 @@ export class LarkCliSenderDirectory {
   private readonly bin: string;
   private readonly runner: CommandRunner;
   private readonly cacheTtlMs: number;
+  private readonly maxCacheEntries: number;
   private readonly cache = new Map<string, { name?: string; expiresAt: number }>();
 
-  constructor(bin = "lark-cli", runner: CommandRunner = runCommand, cacheTtlMs = 86_400_000) {
+  constructor(bin = "lark-cli", runner: CommandRunner = runCommand, cacheTtlMs = 86_400_000, maxCacheEntries = 10_000) {
     this.bin = bin;
     this.runner = runner;
-    this.cacheTtlMs = Math.max(60_000, cacheTtlMs);
+    this.cacheTtlMs = Number.isFinite(cacheTtlMs) ? Math.max(60_000, Math.min(Math.trunc(cacheTtlMs), 30 * 86_400_000)) : 86_400_000;
+    this.maxCacheEntries = Number.isFinite(maxCacheEntries) ? Math.max(1, Math.min(Math.trunc(maxCacheEntries), 100_000)) : 10_000;
   }
 
   async enrich(message: IncomingMessage): Promise<IncomingMessage> {
     if (message.senderName || !message.senderId) return message;
     const now = Date.now();
     const cached = this.cache.get(message.senderId);
-    if (cached && cached.expiresAt > now) return cached.name ? { ...message, senderName: cached.name } : message;
+    if (cached?.expiresAt && cached.expiresAt > now) {
+      this.cache.delete(message.senderId);
+      this.cache.set(message.senderId, cached);
+      return cached.name ? { ...message, senderName: cached.name } : message;
+    }
+    if (cached) this.cache.delete(message.senderId);
     const result = await this.runner(this.bin, ["contact", "+get-user", "--user-id", message.senderId, "--user-id-type", "open_id", "--as", "bot"]);
     const name = result.code === 0 ? extractUserName(result.stdout || "") : undefined;
+    for (const [key, entry] of this.cache) if (entry.expiresAt <= now) this.cache.delete(key);
+    while (this.cache.size >= this.maxCacheEntries) {
+      const oldest = this.cache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
+    }
     this.cache.set(message.senderId, { name, expiresAt: now + (name ? this.cacheTtlMs : 300_000) });
     return name ? { ...message, senderName: name } : message;
   }

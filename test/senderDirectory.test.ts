@@ -106,12 +106,73 @@ test("discovers the MCP contact tool and caches successful lookups", async () =>
   assert.deepEqual(JSON.parse(provider.calls[0].argumentsJson), { user_id: "ou_requester", user_id_type: "open_id" });
 });
 
+test("prefers the exact contact tool over a generic get-user alias", async () => {
+  const provider = new FakeMcpProvider({
+    ok: true,
+    structuredContent: { data: { user: { open_id: "ou_requester", name: "王五" } } },
+  }, [contactTool(directSchema, "get-user"), contactTool(directSchema, "contact_v3_user_get")]);
+  const directory = new McpSenderDirectory(provider, silentLogger);
+  await directory.enrich(incoming("preferred"));
+  assert.equal(provider.calls[0].name, "contact_v3_user_get");
+});
+
+test("honors an explicitly configured sender contact tool", async () => {
+  const provider = new FakeMcpProvider({
+    ok: true,
+    structuredContent: { data: { user: { open_id: "ou_requester", name: "王五" } } },
+  }, [contactTool(directSchema, "contact_v3_user_get"), contactTool(directSchema, "tenant_get_user")]);
+  const directory = new McpSenderDirectory(provider, silentLogger, { toolName: "tenant_get_user" });
+  await directory.enrich(incoming("configured"));
+  assert.equal(provider.calls[0].name, "tenant_get_user");
+});
+
 test("leaves the message usable and negatively caches failed MCP lookups", async () => {
   const provider = new FakeMcpProvider({ ok: false, error: "permission_denied" });
   const directory = new McpSenderDirectory(provider, silentLogger);
   assert.equal((await directory.enrich(incoming("4"))).senderName, undefined);
   assert.equal((await directory.enrich(incoming("5"))).senderName, undefined);
   assert.equal(provider.calls.length, 1);
+});
+
+test("bounds concurrent MCP lookups across different senders", async () => {
+  let active = 0;
+  let maximum = 0;
+  const provider: McpToolProvider = {
+    async listTools() { return [contactTool(directSchema)]; },
+    async callTool(_name, argumentsJson) {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      const senderId = (JSON.parse(argumentsJson) as { user_id: string }).user_id;
+      return { ok: true, structuredContent: { data: { user: { open_id: senderId, name: senderId } } } };
+    },
+    async close() {},
+  };
+  const directory = new McpSenderDirectory(provider, silentLogger, { maxConcurrentLookups: 2 });
+  await Promise.all(Array.from({ length: 6 }, (_, index) => directory.enrich({ ...incoming(`concurrent-${index}`), senderId: `ou_user_${index}` })));
+  assert.equal(maximum, 2);
+});
+
+test("evicts least-recently-used sender cache entries at the configured limit", async () => {
+  let calls = 0;
+  const provider: McpToolProvider = {
+    async listTools() { return [contactTool(directSchema)]; },
+    async callTool(_name, argumentsJson) {
+      calls += 1;
+      const senderId = (JSON.parse(argumentsJson) as { user_id: string }).user_id;
+      return { ok: true, structuredContent: { data: { user: { open_id: senderId, name: senderId } } } };
+    },
+    async close() {},
+  };
+  const directory = new McpSenderDirectory(provider, silentLogger, { maxCacheEntries: 2 });
+  const lookup = (senderId: string, id: string) => directory.enrich({ ...incoming(id), senderId });
+  await lookup("ou_a", "cache-a1");
+  await lookup("ou_b", "cache-b1");
+  await lookup("ou_a", "cache-a2");
+  await lookup("ou_c", "cache-c1");
+  await lookup("ou_b", "cache-b2");
+  assert.equal(calls, 4);
 });
 
 test("passes the MCP-enriched sender name to the conversation agent", async () => {

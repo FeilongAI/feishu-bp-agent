@@ -1,4 +1,5 @@
 import type { BaseFieldAdmin } from "./feishuBase.ts";
+import { canViewRequirement } from "./requirementVisibility.ts";
 import type { AgentToolDefinition, AgentToolExecutor } from "./understanding.ts";
 import type { ConversationState, IncomingMessage, RequirementStore } from "./types.ts";
 
@@ -129,6 +130,7 @@ export function createAgentToolRuntime(context: AgentToolContext): AgentToolRunt
         switch (name) {
           case "save_requirement_draft": {
             const current = context.conversation.draft;
+            if (current && current.requesterId !== context.message.senderId) return { ok: false, error: "draft_owned_by_other" };
             const text = (key: string, max: number): string | undefined => typeof args[key] === "string" && String(args[key]).trim() ? String(args[key]).trim().slice(0, max) : undefined;
             const title = text("title", 80) || current?.title || "未命名需求";
             const goal = text("goal", 1_000) || current?.goal;
@@ -144,7 +146,7 @@ export function createAgentToolRuntime(context: AgentToolContext): AgentToolRunt
               id: current?.id || `DRAFT-${Date.now()}`,
               conversationKey: context.conversationKey,
               requesterId: context.message.senderId,
-              requesterName: context.message.senderName,
+              requesterName: context.message.senderName ?? current?.requesterName,
               title,
               goal,
               scope,
@@ -187,11 +189,15 @@ export function createAgentToolRuntime(context: AgentToolContext): AgentToolRunt
           case "get_administrator":
             return { ok: true, name: context.ownerName, openId: context.ownerId || null };
           case "list_current_work": {
-            const items = (await context.store.listRequirements({ status: "进行中" })).filter((item) => item.ownerId === context.ownerId).slice(0, 10);
+            const items = (await context.store.listRequirements({ status: "进行中" }))
+              .filter((item) => item.ownerId === context.ownerId && canViewRequirement(item, context.message.senderId, context.ownerId))
+              .slice(0, 10);
             return { ok: true, items: items.map((item) => ({ id: item.id, title: item.title, progress: item.progress || null, status: item.status })) };
           }
           case "list_my_requirements": {
-            const items = (await context.store.listRequirements({ requesterId: context.message.senderId })).slice(0, 20);
+            const items = (await context.store.listRequirements({ requesterId: context.message.senderId }))
+              .filter((item) => canViewRequirement(item, context.message.senderId, context.ownerId))
+              .slice(0, 20);
             return { ok: true, items: items.map((item) => ({ id: item.id, title: item.title, status: item.status, desiredDate: item.desiredDate || null })) };
           }
           case "list_base_fields":

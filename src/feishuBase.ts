@@ -74,12 +74,14 @@ export interface BaseFieldAdmin {
 export class FeishuApiError extends Error {
   readonly status: number;
   readonly code?: number;
+  readonly rawCode?: unknown;
 
-  constructor(message: string, status: number, code?: number) {
+  constructor(message: string, status: number, code?: number, rawCode?: unknown) {
     super(message);
     this.name = "FeishuApiError";
     this.status = status;
     this.code = code;
+    this.rawCode = rawCode;
   }
 }
 
@@ -109,7 +111,7 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   }
 
   async createRequirement(requirement: Requirement, clientToken: string): Promise<string> {
-    const data = await this.request("POST", `${this.recordsPath()}?client_token=${encodeURIComponent(clientToken)}`, this.requirementFields(requirement));
+    const data = await this.request("POST", `${this.recordsPath()}?client_token=${encodeURIComponent(clientToken)}`, { fields: this.requirementFields(requirement) });
     const record = this.asObject(data.record);
     const recordId = record.record_id ?? record.recordId ?? data.record_id;
     if (typeof recordId !== "string" || !recordId) throw new FeishuApiError("Feishu Base create response has no record_id", 502);
@@ -117,7 +119,7 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
   }
 
   async updateRequirement(recordId: string, requirement: Requirement): Promise<void> {
-    await this.request("PATCH", `${this.recordsPath()}/${encodeURIComponent(recordId)}`, this.requirementFields(requirement));
+    await this.request("PATCH", `${this.recordsPath()}/${encodeURIComponent(recordId)}`, { fields: this.requirementFields(requirement) });
   }
 
   async deleteRequirement(recordId: string): Promise<void> {
@@ -209,8 +211,9 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
     });
     const payload = await this.responseJson(response);
     const token = payload.tenant_access_token;
-    if (!response.ok || payload.code !== 0 || typeof token !== "string") {
-      throw new FeishuApiError(String(payload.msg || "Unable to obtain tenant access token"), response.status, typeof payload.code === "number" ? payload.code : undefined);
+    const code = this.numericCode(payload.code);
+    if (!response.ok || code !== 0 || typeof token !== "string") {
+      throw new FeishuApiError(this.errorMessage(payload, response.status, "Unable to obtain tenant access token"), response.status, Number.isFinite(code) ? code : undefined, payload.code);
     }
     this.accessToken = token;
     this.tokenExpiresAt = Date.now() + Number(payload.expire || 7200) * 1000;
@@ -232,8 +235,9 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
         continue;
       }
       const payload = await this.responseJson(response);
-      if (!response.ok || payload.code !== 0) {
-        throw new FeishuApiError(String(payload.msg || `Feishu Base request failed with HTTP ${response.status}`), response.status, typeof payload.code === "number" ? payload.code : undefined);
+      const code = this.numericCode(payload.code);
+      if (!response.ok || code !== 0) {
+        throw new FeishuApiError(this.errorMessage(payload, response.status), response.status, Number.isFinite(code) ? code : undefined, payload.code);
       }
       return this.asObject(payload.data);
     }
@@ -251,6 +255,22 @@ export class FeishuBaseClient implements BaseRecordClient, BaseFieldAdmin {
 
   private asObject(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  }
+
+  private numericCode(value: unknown): number {
+    if (typeof value !== "number" && typeof value !== "string") return Number.NaN;
+    if (typeof value === "string" && !value.trim()) return Number.NaN;
+    return Number(value);
+  }
+
+  private errorMessage(payload: Record<string, unknown>, status: number, fallback = `Feishu Base request failed with HTTP ${status}`): string {
+    const data = this.asObject(payload.data);
+    const rawDetail = data.error;
+    const detail = this.asObject(rawDetail);
+    const message = [detail.message, detail.msg, typeof rawDetail === "string" ? rawDetail : undefined, payload.msg, fallback]
+      .find((value): value is string => typeof value === "string" && Boolean(value.trim()))!;
+    const code = payload.code === undefined ? "missing" : String(payload.code).slice(0, 80);
+    return `${message} (code=${code})`;
   }
 }
 

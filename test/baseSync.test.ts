@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BaseSyncWorker } from "../src/baseSync.ts";
-import { FeishuBaseClient, outboxClientToken, type BaseRecordClient } from "../src/feishuBase.ts";
+import { FeishuApiError, FeishuBaseClient, outboxClientToken, type BaseRecordClient } from "../src/feishuBase.ts";
 import type { Logger } from "../src/logger.ts";
 import type { BaseOutboxItem, BaseOutboxStore, Requirement } from "../src/types.ts";
 
@@ -40,10 +40,47 @@ test("uses the official Base record API, tenant token cache, and client_token", 
   assert.equal(calls[2].init?.method, "PATCH");
   assert.equal(calls[3].init?.method, "DELETE");
   assert.equal((calls[1].init?.headers as Record<string, string>).authorization, "Bearer tenant-token");
-  const createBody = JSON.parse(String(calls[1].init?.body)) as Record<string, unknown>;
-  assert.equal(createBody["需求ID"], requirement.id);
-  assert.deepEqual(createBody["投放平台"], ["Meta"]);
-  assert.equal(createBody["创建时间"], "2026-08-05 01:02:03");
+  const createBody = JSON.parse(String(calls[1].init?.body)) as { fields: Record<string, unknown> };
+  assert.equal(createBody.fields["需求ID"], requirement.id);
+  assert.deepEqual(createBody.fields["投放平台"], ["Meta"]);
+  assert.equal(createBody.fields["创建时间"], "2026-08-05 01:02:03");
+  const updateBody = JSON.parse(String(calls[2].init?.body)) as { fields: Record<string, unknown> };
+  assert.equal(updateBody.fields["需求ID"], requirement.id);
+  assert.equal(updateBody.fields["状态"], "进行中");
+});
+
+test("accepts numeric string success codes from Feishu", async () => {
+  const responses = [
+    { code: "0", tenant_access_token: "tenant-token", expire: 7200 },
+    { code: "0", data: { record: { record_id: "rec_string_code" } } },
+  ];
+  const fakeFetch = (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch;
+  const client = new FeishuBaseClient({ appId: "cli_app", appSecret: "secret", baseToken: "base", tableId: "table" }, fakeFetch);
+  assert.equal(await client.createRequirement(requirement, outboxClientToken(43)), "rec_string_code");
+});
+
+test("throws the original Base business error for numeric string and invalid codes", async () => {
+  const responses = [
+    { code: 0, tenant_access_token: "tenant-token", expire: 7200 },
+    { code: "1254001", msg: "WrongRequestBody", data: { error: { message: "fields is required" } } },
+    { code: "not-a-number", msg: "Malformed business code" },
+  ];
+  const fakeFetch = (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch;
+  const client = new FeishuBaseClient({ appId: "cli_app", appSecret: "secret", baseToken: "base", tableId: "table" }, fakeFetch);
+  await assert.rejects(client.createRequirement(requirement, outboxClientToken(44)), (error: Error) => {
+    assert.ok(error instanceof FeishuApiError);
+    assert.equal(error.code, 1254001);
+    assert.equal(error.rawCode, "1254001");
+    assert.match(error.message, /fields is required.*code=1254001/);
+    return true;
+  });
+  await assert.rejects(client.updateRequirement("rec_1", requirement), (error: Error) => {
+    assert.ok(error instanceof FeishuApiError);
+    assert.equal(error.code, undefined);
+    assert.equal(error.rawCode, "not-a-number");
+    assert.match(error.message, /Malformed business code.*code=not-a-number/);
+    return true;
+  });
 });
 
 test("treats deleting an already absent Base record as success", async () => {

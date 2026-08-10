@@ -45,6 +45,10 @@ export class ConversationService {
       ? `${message.chatId}:${message.threadId ?? "main"}`
       : `${message.chatId}:${message.senderId}:${message.threadId ?? "main"}`;
     const conversation = await this.store.getConversation(key) ?? this.newConversation(message, key);
+    if (message.senderName && conversation.senderId === message.senderId) conversation.senderName = message.senderName;
+    if (message.senderName && conversation.draft?.requesterId === message.senderId && !conversation.draft.requesterName) {
+      conversation.draft.requesterName = message.senderName;
+    }
     const text = message.content.trim();
     const ruleCurrentWork = this.isCurrentWorkQuery(text);
     const ruleMyRequirements = this.isMyRequirementsQuery(text);

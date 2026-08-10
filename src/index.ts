@@ -13,6 +13,7 @@ import { PostgresRequirementStore } from "./postgres.ts";
 import { InMemoryRequirementStore } from "./store.ts";
 import { OpenAICompatibleAgentClient, OpenAICompatibleUnderstandingClient } from "./understanding.ts";
 import { LarkMcpClient, parseMcpToolAllowlist } from "./mcpClient.ts";
+import { McpSenderDirectory } from "./senderDirectory.ts";
 
 const auth = {
   adminApiKey: process.env.ADMIN_API_KEY || "",
@@ -104,13 +105,19 @@ const service = new ConversationService(store, {
   agent,
   mcp,
 }, understanding);
+const senderDirectory = mcp
+  ? new McpSenderDirectory(mcp, logger, {
+    cacheTtlMs: Number(process.env.SENDER_NAME_CACHE_TTL_MS || 86_400_000),
+    negativeCacheTtlMs: Number(process.env.SENDER_NAME_NEGATIVE_CACHE_TTL_MS || 300_000),
+  })
+  : undefined;
 const processor = new MessageProcessor(store, service, {
   allowedTenantKeys: csvSet(process.env.ALLOWED_TENANT_KEYS),
   allowedUserIds: csvSet(process.env.ALLOWED_USER_IDS),
   allowedChatIds: csvSet(process.env.ALLOWED_CHAT_IDS),
   groupRequireMention: process.env.GROUP_REQUIRE_MENTION !== "false",
   botOpenId: process.env.BOT_OPEN_ID,
-}, logger);
+}, logger, senderDirectory);
 const confirmation = new ConfirmationService(process.env.CONFIRMATION_SECRET || "");
 const server = createHttpServer(processor, store, { auth, confirmation, logger, ingressSigningSecret: process.env.INGRESS_EVENT_SECRET, requireIngressSignature: process.env.NODE_ENV === "production" });
 const port = Number(process.env.PORT || 8090);

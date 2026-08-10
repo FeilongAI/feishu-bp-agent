@@ -96,6 +96,8 @@ docker compose --profile mcp up -d
 
 MCP 写操作会要求发起人回复“确认执行”；取消时回复“取消操作”。`lark-mcp` 容器以非 root 用户运行。
 
+如需通过 `open_id` 自动补全私聊发送者姓名，请确保 `MCP_LARK_TOOLS` 包含 `contact.v3.user.get`；如果配置了 `MCP_TOOL_ALLOWLIST`，也要把该工具加入白名单。飞书应用需要开通 `contact:user.base:readonly`，重新发布/审批应用版本，并把对应用户纳入应用通讯录可见范围。配置修改后需要重建并重启 `lark-mcp` 与核心服务。
+
 ## 常用运维命令
 
 ```bash

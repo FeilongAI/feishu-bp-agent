@@ -73,6 +73,8 @@ The MCP profile is optional and does not participate in normal Compose interpola
 
 The local profile exposes only the tools named by `MCP_LARK_TOOLS`; the core client applies a second `MCP_TOOL_ALLOWLIST` filter. Any MCP tool whose name indicates a mutation is held for application-level confirmation before execution. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
 
+To resolve a private-chat sender's display name from `open_id`, expose `contact.v3.user.get` in `MCP_LARK_TOOLS` and keep it in `MCP_TOOL_ALLOWLIST` when that allowlist is set. The core service performs this read-only lookup before calling the model, validates that the returned `open_id` matches the sender, and caches the result. The Feishu app still needs `contact:user.base:readonly`, a published/approved app version, and contact visibility that includes the sender; MCP does not bypass those controls. `SENDER_NAME_CACHE_TTL_MS` and `SENDER_NAME_NEGATIVE_CACHE_TTL_MS` control successful and failed lookup caching.
+
 ## 2. Build and run against an existing PostgreSQL
 
 ```bash

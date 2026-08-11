@@ -48,7 +48,23 @@ interface ToolFailure {
   toolName: string;
   error: string;
   detail?: string;
+  source: "internal" | "feishu";
 }
+
+const EXPECTED_INTERNAL_TOOL_ERRORS = new Set([
+  "explicit_cancellation_required",
+  "explicit_confirmation_required",
+  "no_owned_requirement_draft",
+  "requirement_fields_missing",
+  "draft_owned_by_other",
+  "requirement_table_url_not_configured",
+  "base_admin_not_enabled",
+  "admin_only",
+  "field_name_required",
+  "field_not_found",
+  "ambiguous_field",
+  "primary_field_cannot_be_deleted",
+]);
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -85,18 +101,37 @@ function searchMcpTools(tools: Awaited<ReturnType<McpToolProvider["listTools"]>>
     .map((item) => item.tool.function);
 }
 
-function toolFailure(name: string, result: unknown): ToolFailure | undefined {
+function toolFailure(name: string, result: unknown, source: ToolFailure["source"]): ToolFailure | undefined {
   const record = asObject(result);
   if (record.ok === true) return undefined;
   const error = typeof record.error === "string" && record.error.trim() ? record.error.trim().slice(0, 160) : "tool_failed";
-  const detail = typeof record.detail === "string" && record.detail.trim()
-    ? String(redact(record.detail)).replace(/\s+/g, " ").trim().slice(0, 500)
+  const rawDetail = typeof record.detail === "string" ? record.detail : typeof record.setup === "string" ? record.setup : undefined;
+  const detail = rawDetail?.trim()
+    ? String(redact(rawDetail)).replace(/\s+/g, " ").trim().slice(0, 500)
     : undefined;
-  return { toolName: name, error, detail };
+  return { toolName: name, error, detail, source };
 }
 
 function formatToolFailures(failures: ToolFailure[], partialSuccess: boolean): string {
   const failure = failures[failures.length - 1];
+  if (failure.source === "internal") {
+    const internalMessages: Record<string, string> = {
+      explicit_cancellation_required: "我没有清除当前需求草稿。只有你明确说“取消当前需求”“放弃当前需求”或“清空当前需求”时才会清除；如果只是想修改，请直接告诉我要改什么。",
+      explicit_confirmation_required: "我没有提交需求。请先核对需求内容，确认无误后明确回复“确认提交”。",
+      no_owned_requirement_draft: "当前没有由你发起、可以操作的需求草稿。你可以直接描述一个新需求。",
+      requirement_fields_missing: "需求草稿还缺少必要信息，我没有提交。请继续补充业务目标、需求范围或验收标准。",
+      draft_owned_by_other: "当前群聊中的需求草稿由其他成员发起，只有发起人可以修改、取消或提交。",
+      requirement_table_url_not_configured: "当前还没有配置需求多维表格地址，请管理员完成配置后重试。",
+      base_admin_not_enabled: "当前没有启用多维表格字段管理能力，请管理员启用后重试。",
+      admin_only: "这项操作只有管理员可以执行。",
+      field_name_required: "请告诉我要操作的具体字段名称。",
+      field_not_found: "没有找到指定的多维表格字段，请检查字段名称后重试。",
+      ambiguous_field: "找到了多个同名字段，请提供准确的字段 ID。",
+      primary_field_cannot_be_deleted: "该字段是多维表格主字段，不能删除。",
+    };
+    return internalMessages[failure.error]
+      || `内部工具“${failure.toolName}”未完成操作：${failure.error}${failure.detail ? `（${failure.detail}）` : ""}。`;
+  }
   const raw = `${failure.error} ${failure.detail || ""}`.toLowerCase();
   let advice = "请根据上面的错误检查参数、资源标识和服务状态后重试。";
   if (/permission|forbidden|unauthorized|scope|999916/.test(raw)) advice = "请检查飞书应用权限、应用版本是否已发布，以及该资源是否在应用可见范围内。";
@@ -106,6 +141,15 @@ function formatToolFailures(failures: ToolFailure[], partialSuccess: boolean): s
   const detail = failure.detail && failure.detail !== failure.error ? `；飞书返回：${failure.detail}` : "";
   const prefix = partialSuccess ? "部分工具调用已成功，但" : "";
   return `${prefix}调用飞书工具“${failure.toolName}”失败：${failure.error}${detail}。我没有把失败的操作当作已完成。${advice}`;
+}
+
+function agentHandledExpectedFailures(failures: ToolFailure[], text: string | undefined): boolean {
+  if (!text?.trim() || !failures.length) return false;
+  if (!failures.every((failure) => failure.source === "internal" && EXPECTED_INTERNAL_TOOL_ERRORS.has(failure.error))) return false;
+  if (/(?:已|已经|成功).{0,12}(?:清除|取消|提交|删除|创建|更新|保存|完成|处理)|(?:清除|取消|提交|删除|创建|更新|保存).{0,8}(?:成功|完成)/.test(text)) return false;
+  // Only trust the model's continuation when it explicitly communicates that
+  // the operation was not performed or asks the user for the missing action.
+  return /(没有|尚未|未能|不能|无法|需要|请|只有|先|补充|明确|确认)/.test(text);
 }
 
 const PLATFORM_ALIASES: Record<string, string[]> = {
@@ -254,8 +298,8 @@ export class ConversationService {
       let mcpActionConflict = false;
       let successfulToolCalls = 0;
       const toolFailures: ToolFailure[] = [];
-      const markToolResult = (name: string, result: unknown, countSuccess = true): unknown => {
-        const failure = toolFailure(name, result);
+      const markToolResult = (name: string, result: unknown, source: ToolFailure["source"], countSuccess = true): unknown => {
+        const failure = toolFailure(name, result, source);
         if (failure) toolFailures.push(failure);
         else if (countSuccess) successfulToolCalls += 1;
         return result;
@@ -264,24 +308,24 @@ export class ConversationService {
         execute: async (name: string, argumentsJson: string) => {
           if (name === FIND_FEISHU_TOOLS) {
             const args = parseToolArguments(argumentsJson);
-            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" }, false);
-            if (mcpDiscoveryError) return markToolResult(name, { ok: false, error: "mcp_tool_discovery_failed", detail: mcpDiscoveryError }, false);
+            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" }, "feishu", false);
+            if (mcpDiscoveryError) return markToolResult(name, { ok: false, error: "mcp_tool_discovery_failed", detail: mcpDiscoveryError }, "feishu", false);
             const query = typeof args.query === "string" ? args.query.trim() : "";
-            if (!query) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "query 不能为空" }, false);
+            if (!query) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "query 不能为空" }, "feishu", false);
             const requestedLimit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.trunc(args.limit) : 10;
             const tools = searchMcpTools(discoveredMcpTools, query, Math.max(1, Math.min(requestedLimit, 20)));
-            return markToolResult(name, { ok: true, totalAvailable: discoveredMcpTools.length, matches: tools }, false);
+            return markToolResult(name, { ok: true, totalAvailable: discoveredMcpTools.length, matches: tools }, "feishu", false);
           }
 
           let mcpToolName: string | undefined;
           let mcpArgumentsJson = argumentsJson;
           if (name === CALL_FEISHU_TOOL) {
             const args = parseToolArguments(argumentsJson);
-            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" });
+            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" }, "feishu");
             mcpToolName = typeof args.toolName === "string" ? args.toolName.trim() : "";
             const targetArguments = asObject(args.arguments);
             if (!mcpToolName || !mcpTools.has(mcpToolName)) {
-              return markToolResult(mcpToolName || name, { ok: false, error: "mcp_tool_not_found", detail: "请先使用 find_feishu_tools 搜索真实工具名" });
+              return markToolResult(mcpToolName || name, { ok: false, error: "mcp_tool_not_found", detail: "请先使用 find_feishu_tools 搜索真实工具名" }, "feishu");
             }
             mcpArgumentsJson = JSON.stringify(targetArguments);
           } else if (mcpTools.has(name)) {
@@ -316,15 +360,15 @@ export class ConversationService {
               return { ok: false, confirmationRequired: true, toolName: pending?.toolName || mcpToolName, expiresInMinutes: 10 };
             }
             try {
-              return markToolResult(mcpToolName, await this.config.mcp!.callTool(mcpToolName, mcpArgumentsJson));
+              return markToolResult(mcpToolName, await this.config.mcp!.callTool(mcpToolName, mcpArgumentsJson), "feishu");
             } catch (error) {
-              return markToolResult(mcpToolName, { ok: false, error: "mcp_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined });
+              return markToolResult(mcpToolName, { ok: false, error: "mcp_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined }, "feishu");
             }
           }
           try {
-            return markToolResult(name, await runtime.executor.execute(name, argumentsJson));
+            return markToolResult(name, await runtime.executor.execute(name, argumentsJson), "internal");
           } catch (error) {
-            return markToolResult(name, { ok: false, error: "tool_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined });
+            return markToolResult(name, { ok: false, error: "tool_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined }, "internal");
           }
         },
       };
@@ -350,6 +394,7 @@ export class ConversationService {
       }
       if (toolFailures.length) {
         await this.store.saveConversation(conversation);
+        if (agentHandledExpectedFailures(toolFailures, agentResult?.text)) return { text: agentResult!.text! };
         return { text: formatToolFailures(toolFailures, successfulToolCalls > 0) };
       }
       if (agentResult?.text || agentResult?.usedTools) {

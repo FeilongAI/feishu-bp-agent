@@ -107,6 +107,35 @@ test("lets the agent own requirement conversation and persistence through tools"
   assert.equal((await store.listRequirements()).length, 1);
 });
 
+test("lets the agent naturally explain an expected draft cancellation guard", async () => {
+  const store = new InMemoryRequirementStore();
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      const result = await executor.execute("clear_requirement_draft", "{}");
+      assert.deepEqual(result, { ok: false, error: "explicit_cancellation_required" });
+      return { usedTools: true, text: "需要你明确说“取消当前需求”我才会清除草稿。你也可以直接告诉我想修改什么。" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  const reply = (await service.handleMessage(message("这个标题不太好，换一个", "guard-clear"))).text;
+  assert.match(reply, /需要你明确说/);
+  assert.doesNotMatch(reply, /飞书工具|explicit_cancellation_required/);
+});
+
+test("does not trust a false success claim after draft cancellation is rejected", async () => {
+  const store = new InMemoryRequirementStore();
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      await executor.execute("clear_requirement_draft", "{}");
+      return { usedTools: true, text: "已清除当前需求。" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent });
+  const reply = (await service.handleMessage(message("这个标题不太好，换一个", "guard-false-success"))).text;
+  assert.match(reply, /我没有清除当前需求草稿/);
+  assert.doesNotMatch(reply, /飞书工具|explicit_cancellation_required/);
+});
+
 test("does not trust the agent when a Feishu Base tool fails", async () => {
   const store = new InMemoryRequirementStore();
   const mcp = {

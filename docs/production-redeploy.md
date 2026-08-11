@@ -89,7 +89,7 @@ docker exec feishu-bp-forwarder wget -qO- http://127.0.0.1:8091/healthz
 
 ## 启用本地 MCP
 
-在 `.env` 中设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`、`MCP_ALLOWED_TOOLS=`，并配置 `MCP_TOOL_ALLOWLIST` 和 `MCP_LARK_TOOLS`。`MCP_ALLOWED_TOOLS` 请求头用于官方远程 MCP，本地 profile 依靠 `MCP_LARK_TOOLS` 和核心 allowlist 控制工具。然后执行：
+在 `.env` 中只需设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`。本地 MCP 会从安装的官方包自动加载全部工具，不需要配置工具白名单或逐个填写工具名。然后执行：
 
 ```bash
 docker compose --profile mcp build
@@ -98,7 +98,7 @@ docker compose --profile mcp up -d
 
 MCP 写操作会要求发起人回复“确认执行”；取消时回复“取消操作”。`lark-mcp` 容器以非 root 用户运行。
 
-如需让核心服务也通过 MCP 按 `open_id` 补全姓名，请确保 `MCP_LARK_TOOLS` 包含点号形式的 API 标识 `contact.v3.user.get`；如果配置了 `MCP_TOOL_ALLOWLIST`，其中必须填写 MCP 实际暴露的 snake 工具名 `contact_v3_user_get`。可设置 `SENDER_NAME_MCP_TOOL=contact_v3_user_get` 固定工具选择。配置修改后需要重建并重启 `lark-mcp` 与核心服务。
+核心服务会在完整目录中自动找到 `contact_v3_user_get`，按 `open_id` 补全姓名。飞书应用仍需开通 `contact:user.base:readonly`，发布包含该权限的版本，并将用户纳入应用通讯录可见范围。
 
 ## 常用运维命令
 

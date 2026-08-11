@@ -30,39 +30,19 @@ LLM_ENABLED=true
 LLM_BASE_URL=https://your-provider.example/v1
 LLM_API_KEY=your_server_side_api_key
 LLM_MODEL=your_model_name
-LLM_TIMEOUT_MS=8000
-LLM_MAX_RETRIES=1
-LLM_MAX_INPUT_CHARS=6000
-LLM_AGENT_ENABLED=true
 ```
 
-The provider must implement `POST /chat/completions` and JSON object response mode. Keep `LLM_API_KEY` only in the server environment. Requirement messages and a bounded amount of recent conversation context are sent to this provider, so choose the provider and data-retention policy according to your privacy requirements. If the provider times out, returns an error, or returns malformed data, the service continues with the built-in deterministic rules.
+The provider must implement `POST /chat/completions` and tool calling. Keep `LLM_API_KEY` only in the server environment. Requirement messages and a bounded amount of recent conversation context are sent to this provider, so choose the provider and data-retention policy according to your privacy requirements. Timeout, retry and context limits have production defaults in code and only need environment overrides for advanced tuning.
 
-When agent mode is enabled, the model owns the conversation loop. It receives the current message, recent context, and draft, then decides whether to ask a question or call `save_requirement_draft`, `submit_requirement`, the allowlisted BP query tools, or an MCP tool. The service executes tools and sends results back to the model. It does not expose arbitrary shell commands or Feishu API paths to the model. Requirement submission, Base field deletion, MCP mutation confirmation, permissions, idempotency, and locks remain service-side security boundaries.
+When agent mode is enabled, the model owns the conversation loop. It receives the current message, recent context, and draft, then decides whether to ask a question or call a BP tool. For Feishu operations it searches the live MCP catalog with `find_feishu_tools`, then invokes the selected tool through `call_feishu_tool`. The service executes tools and sends results back to the model. Requirement submission, Base field deletion, MCP mutation confirmation, permissions, idempotency, and locks remain service-side security boundaries.
 
-## Official remote Lark MCP bridge
+## Official Lark MCP bridge
 
-The preferred integration uses Feishu's official remote MCP endpoint. It dynamically lists and calls the tools allowed by the request headers; no Feishu tool schema is hard-coded in this service:
+The bundled Compose profile runs the official `@larksuiteoapi/lark-mcp` package and exposes every API tool included in that installed version:
 
 ```dotenv
 MCP_ENABLED=true
-MCP_URL=https://mcp.feishu.cn/mcp
-MCP_TAT=t-gxxxxxxxxxxxxxxxxxxxxx
-MCP_ALLOWED_TOOLS=search-user,get-user,fetch-file,search-doc,create-doc,fetch-doc,update-doc,list-docs,get-comments,add-comments
-MCP_TOOL_ALLOWLIST=search-user,get-user,fetch-file,search-doc,create-doc,fetch-doc,update-doc,list-docs,get-comments,add-comments
-```
-
-`MCP_TAT` uses application identity. Use `MCP_UAT` when the tools must act as a specific user. Request only the permissions required by the selected tools. The remote service currently documents cloud-document tools; field and record operations in Base are not part of this remote endpoint yet.
-
-The two tool lists serve different boundaries: `MCP_ALLOWED_TOOLS` is sent to Feishu in `X-Lark-MCP-Allowed-Tools`, while `MCP_TOOL_ALLOWLIST` is enforced again by this service after `tools/list`. Keep both lists identical and use the exact hyphenated names from the remote MCP documentation. Read-only tools can run immediately. Tools whose names indicate a mutation (for example `create-doc` or `update-doc`) are intercepted by the service; the requester must reply `确认执行` (or `取消操作`) within 10 minutes before the remote `tools/call` is sent.
-
-For Base or other tool domains, the repository also includes an optional local `lark-mcp` Compose profile. It runs the official `@larksuiteoapi/lark-mcp` package in streamable HTTP mode and keeps its Feishu credentials in the MCP container:
-
-```dotenv
 MCP_URL=http://lark-mcp:3000/mcp
-MCP_TAT=
-MCP_UAT=
-MCP_ALLOWED_TOOLS=
 ```
 
 ```bash
@@ -70,11 +50,11 @@ docker compose --profile mcp build
 docker compose --profile mcp up -d
 ```
 
-The MCP profile is optional and does not participate in normal Compose interpolation. When it is enabled, set `FEISHU_APP_ID` and `FEISHU_APP_SECRET`; the MCP image validates them when it starts. The container runs as the unprivileged `app` user.
+The MCP profile uses `FEISHU_APP_ID` and `FEISHU_APP_SECRET`, registers tools in automatic token mode, and runs as the unprivileged `app` user. There is no `MCP_LARK_TOOLS`, request-header allowlist, or second core allowlist to maintain. The model sees two stable broker tools instead of receiving more than a thousand schemas in every prompt: it searches the complete catalog, then calls the exact returned tool. Read operations execute immediately; mutation tools are held for requester confirmation. The existing Base field deletion path also remains protected by `OWNER_OPEN_ID` and explicit `确认删除` confirmation. Feishu APIs that only accept user identity still require a valid user OAuth token; granting every application scope cannot turn an application token into a user token.
 
-The local profile exposes only the tools named by `MCP_LARK_TOOLS`; clear `MCP_ALLOWED_TOOLS` because that header is for the official remote endpoint. The core client applies a second `MCP_TOOL_ALLOWLIST` filter. Any MCP tool whose name indicates a mutation is held for application-level confirmation before execution. The existing Base field deletion path remains protected by `OWNER_OPEN_ID` and the explicit `确认删除` confirmation.
+Private-chat name lookup automatically finds `contact_v3_user_get` in the same complete catalog. The Feishu app still needs `contact:user.base:readonly`, a published/approved app version, and contact visibility that includes the sender; MCP does not bypass Feishu's server-side permissions.
 
-To resolve a private-chat sender's display name from `open_id`, expose the API identifier `contact.v3.user.get` in `MCP_LARK_TOOLS`. Because the Compose MCP process uses `--tool-name-case snake`, put `contact_v3_user_get` (not the dotted API identifier) in `MCP_TOOL_ALLOWLIST` when that allowlist is set. `SENDER_NAME_MCP_TOOL=contact_v3_user_get` can pin discovery to that exact tool. The core service performs this read-only lookup before calling the model, validates that the returned `open_id` matches the sender, and caches the result with bounded size and concurrency. The Feishu app still needs `contact:user.base:readonly`, a published/approved app version, and contact visibility that includes the sender; MCP does not bypass those controls. `SENDER_NAME_CACHE_TTL_MS`, `SENDER_NAME_NEGATIVE_CACHE_TTL_MS`, `SENDER_NAME_CACHE_MAX_ENTRIES`, and `SENDER_NAME_MAX_CONCURRENT_LOOKUPS` control the cache and lookup load.
+The core can also connect to a separately managed remote MCP endpoint by changing `MCP_URL` and optionally setting `MCP_TAT` or `MCP_UAT`. It accepts every tool returned by that server and does not send a client-side allowlist header.
 
 ## 2. Build and run against an existing PostgreSQL
 

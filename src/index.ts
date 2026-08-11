@@ -12,7 +12,7 @@ import { csvSet } from "./permissions.ts";
 import { PostgresRequirementStore } from "./postgres.ts";
 import { InMemoryRequirementStore } from "./store.ts";
 import { OpenAICompatibleAgentClient, OpenAICompatibleUnderstandingClient } from "./understanding.ts";
-import { LarkMcpClient, parseMcpToolAllowlist } from "./mcpClient.ts";
+import { LarkMcpClient } from "./mcpClient.ts";
 import { McpSenderDirectory } from "./senderDirectory.ts";
 
 const auth = {
@@ -85,14 +85,11 @@ const agent = agentEnabled
 const mcp = process.env.MCP_ENABLED === "true"
   ? new LarkMcpClient({
     url: process.env.MCP_URL || "",
-    toolAllowlist: parseMcpToolAllowlist(process.env.MCP_TOOL_ALLOWLIST),
     authToken: process.env.MCP_TAT || process.env.MCP_UAT,
     authType: process.env.MCP_TAT ? "tat" : process.env.MCP_UAT ? "uat" : undefined,
-    allowedTools: parseMcpToolAllowlist(process.env.MCP_ALLOWED_TOOLS),
     appId: process.env.FEISHU_APP_ID,
     appSecret: process.env.FEISHU_APP_SECRET,
     apiBaseUrl: process.env.FEISHU_API_BASE_URL,
-    maxTools: Number(process.env.MCP_MAX_TOOLS || 80),
     timeoutMs: Number(process.env.MCP_TIMEOUT_MS || 15_000),
   }, logger)
   : undefined;

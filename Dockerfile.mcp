@@ -4,6 +4,8 @@ ARG LARK_MCP_VERSION=0.5.1
 
 RUN npm install --global --no-audit --no-fund "@larksuiteoapi/lark-mcp@${LARK_MCP_VERSION}"
 
+COPY --chmod=755 lark-mcp-entrypoint.sh /usr/local/bin/lark-mcp-entrypoint.sh
+
 RUN groupadd --system app && useradd --system --gid app --create-home --home-dir /home/app app
 
 ENV APP_ID= \
@@ -16,5 +18,5 @@ EXPOSE 3000
 
 USER app
 
-ENTRYPOINT ["lark-mcp", "mcp"]
+ENTRYPOINT ["lark-mcp-entrypoint.sh"]
 CMD ["--mode", "streamable", "--host", "0.0.0.0", "--port", "3000", "--language", "zh", "--tool-name-case", "snake"]

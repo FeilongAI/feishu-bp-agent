@@ -4,6 +4,109 @@ import { createAgentToolRuntime } from "./agentTools.ts";
 import { isMcpMutationTool, type McpToolProvider } from "./mcpClient.ts";
 import type { AgentClient, ExtractedRequirementFields, MessageUnderstanding, UnderstandingClient } from "./understanding.ts";
 import { canViewRequirement } from "./requirementVisibility.ts";
+import { redact } from "./logger.ts";
+
+const FIND_FEISHU_TOOLS = "find_feishu_tools";
+const CALL_FEISHU_TOOL = "call_feishu_tool";
+
+const mcpBrokerDefinitions = [
+  {
+    type: "function" as const,
+    function: {
+      name: FIND_FEISHU_TOOLS,
+      description: "搜索当前可用的飞书工具。需要操作飞书文档、多维表格、消息、日历、任务、通讯录等资源时先调用；结果会返回真实工具名、说明和完整参数结构。可继续搜索直到找到合适工具。",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["query"],
+        properties: {
+          query: { type: "string", description: "用中文业务词和可能的英文 API 词描述能力，例如：多维表格 删除字段 bitable field delete" },
+          limit: { type: "integer", minimum: 1, maximum: 20, description: "最多返回的候选数，默认 10" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: CALL_FEISHU_TOOL,
+      description: "调用 find_feishu_tools 返回的任意飞书工具。toolName 必须使用搜索结果中的真实名称，arguments 必须遵循该工具返回的参数结构。写操作会由服务要求用户二次确认。",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["toolName", "arguments"],
+        properties: {
+          toolName: { type: "string", description: "find_feishu_tools 返回的真实工具名" },
+          arguments: { type: "object", description: "目标工具所需参数" },
+        },
+      },
+    },
+  },
+];
+
+interface ToolFailure {
+  toolName: string;
+  error: string;
+  detail?: string;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function parseToolArguments(argumentsJson: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(argumentsJson || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function searchMcpTools(tools: Awaited<ReturnType<McpToolProvider["listTools"]>>, query: string, limit: number) {
+  const normalizedQuery = query.toLowerCase().trim();
+  const terms = normalizedQuery.split(/[\s,，、/]+/).filter((term) => term.length > 1);
+  return tools
+    .map((tool, index) => {
+      const name = tool.function.name.toLowerCase();
+      const description = tool.function.description.toLowerCase();
+      const haystack = `${name} ${description}`;
+      let score = normalizedQuery && haystack.includes(normalizedQuery) ? 100 : 0;
+      for (const term of terms) {
+        if (name === term) score += 80;
+        else if (name.includes(term)) score += 20;
+        if (description.includes(term)) score += 8;
+      }
+      return { tool, score, index };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, limit)
+    .map((item) => item.tool.function);
+}
+
+function toolFailure(name: string, result: unknown): ToolFailure | undefined {
+  const record = asObject(result);
+  if (record.ok === true) return undefined;
+  const error = typeof record.error === "string" && record.error.trim() ? record.error.trim().slice(0, 160) : "tool_failed";
+  const detail = typeof record.detail === "string" && record.detail.trim()
+    ? String(redact(record.detail)).replace(/\s+/g, " ").trim().slice(0, 500)
+    : undefined;
+  return { toolName: name, error, detail };
+}
+
+function formatToolFailures(failures: ToolFailure[], partialSuccess: boolean): string {
+  const failure = failures[failures.length - 1];
+  const raw = `${failure.error} ${failure.detail || ""}`.toLowerCase();
+  let advice = "请根据上面的错误检查参数、资源标识和服务状态后重试。";
+  if (/permission|forbidden|unauthorized|scope|999916/.test(raw)) advice = "请检查飞书应用权限、应用版本是否已发布，以及该资源是否在应用可见范围内。";
+  else if (/argument|parameter|invalid|schema|field/.test(raw)) advice = "请检查工具参数是否符合参数结构，以及 app_token、table_id、record_id、field_id 等资源标识是否正确。";
+  else if (/unavailable|timeout|connect|transport|network/.test(raw)) advice = "请检查 MCP 服务是否健康、网络是否可达，然后重试。";
+  else if (/not_found|not found|unknown tool|allowlist/.test(raw)) advice = "请重新搜索工具，并确认服务已加载对应的飞书 API 工具。";
+  const detail = failure.detail && failure.detail !== failure.error ? `；飞书返回：${failure.detail}` : "";
+  const prefix = partialSuccess ? "部分工具调用已成功，但" : "";
+  return `${prefix}调用飞书工具“${failure.toolName}”失败：${failure.error}${detail}。我没有把失败的操作当作已完成。${advice}`;
+}
 
 const PLATFORM_ALIASES: Record<string, string[]> = {
   TikTok: ["tiktok", "tiktok ads"],
@@ -137,21 +240,58 @@ export class ConversationService {
         conversation,
         conversationKey: key,
       });
-      const discoveredMcpTools = this.config.mcp ? await this.config.mcp.listTools().catch(() => []) : [];
-      const mcpTools = discoveredMcpTools.filter((tool) => !runtime.definitions.some((item) => item.function.name === tool.function.name));
-      runtime.definitions.push(...mcpTools);
+      let mcpDiscoveryError: string | undefined;
+      const discoveredMcpTools = this.config.mcp
+        ? await this.config.mcp.listTools().catch((error) => {
+          mcpDiscoveryError = error instanceof Error ? error.message.slice(0, 300) : "mcp_tool_discovery_failed";
+          return [];
+        })
+        : [];
+      const mcpTools = new Map(discoveredMcpTools.map((tool) => [tool.function.name, tool]));
+      if (this.config.mcp) runtime.definitions.push(...mcpBrokerDefinitions);
       let mcpActionRequested = false;
       let mcpActionDenied = false;
       let mcpActionConflict = false;
-      let agentToolFailed = false;
-      const markToolResult = (result: unknown): unknown => {
-        if (!result || typeof result !== "object" || (result as Record<string, unknown>).ok !== true) agentToolFailed = true;
+      let successfulToolCalls = 0;
+      const toolFailures: ToolFailure[] = [];
+      const markToolResult = (name: string, result: unknown, countSuccess = true): unknown => {
+        const failure = toolFailure(name, result);
+        if (failure) toolFailures.push(failure);
+        else if (countSuccess) successfulToolCalls += 1;
         return result;
       };
       const executor = {
         execute: async (name: string, argumentsJson: string) => {
-          if (mcpTools.some((tool) => tool.function.name === name)) {
-            if (isMcpMutationTool(name)) {
+          if (name === FIND_FEISHU_TOOLS) {
+            const args = parseToolArguments(argumentsJson);
+            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" }, false);
+            if (mcpDiscoveryError) return markToolResult(name, { ok: false, error: "mcp_tool_discovery_failed", detail: mcpDiscoveryError }, false);
+            const query = typeof args.query === "string" ? args.query.trim() : "";
+            if (!query) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "query 不能为空" }, false);
+            const requestedLimit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.trunc(args.limit) : 10;
+            const tools = searchMcpTools(discoveredMcpTools, query, Math.max(1, Math.min(requestedLimit, 20)));
+            return markToolResult(name, { ok: true, totalAvailable: discoveredMcpTools.length, matches: tools }, false);
+          }
+
+          let mcpToolName: string | undefined;
+          let mcpArgumentsJson = argumentsJson;
+          if (name === CALL_FEISHU_TOOL) {
+            const args = parseToolArguments(argumentsJson);
+            if (!args) return markToolResult(name, { ok: false, error: "invalid_tool_arguments", detail: "参数必须是 JSON 对象" });
+            mcpToolName = typeof args.toolName === "string" ? args.toolName.trim() : "";
+            const targetArguments = asObject(args.arguments);
+            if (!mcpToolName || !mcpTools.has(mcpToolName)) {
+              return markToolResult(mcpToolName || name, { ok: false, error: "mcp_tool_not_found", detail: "请先使用 find_feishu_tools 搜索真实工具名" });
+            }
+            mcpArgumentsJson = JSON.stringify(targetArguments);
+          } else if (mcpTools.has(name)) {
+            // Keep direct execution compatible with existing clients, while the
+            // model-facing interface uses the searchable broker above.
+            mcpToolName = name;
+          }
+
+          if (mcpToolName) {
+            if (isMcpMutationTool(mcpToolName)) {
               if (conversation.pendingMcpAction && conversation.pendingMcpAction.requestedById !== message.senderId) {
                 mcpActionDenied = true;
                 return { ok: false, error: "mcp_confirmation_owned_by_other" };
@@ -162,8 +302,8 @@ export class ConversationService {
               }
               if (!conversation.pendingMcpAction || conversation.pendingMcpAction.requestedById === message.senderId) {
                 conversation.pendingMcpAction = {
-                  toolName: name,
-                  argumentsJson: argumentsJson.slice(0, 20_000),
+                  toolName: mcpToolName,
+                  argumentsJson: mcpArgumentsJson.slice(0, 20_000),
                   requestedById: message.senderId,
                   requestedAt: new Date().toISOString(),
                   expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
@@ -173,18 +313,18 @@ export class ConversationService {
               mcpActionRequested = true;
               await this.store.saveConversation(conversation);
               const pending = conversation.pendingMcpAction;
-              return { ok: false, confirmationRequired: true, toolName: pending?.toolName || name, expiresInMinutes: 10 };
+              return { ok: false, confirmationRequired: true, toolName: pending?.toolName || mcpToolName, expiresInMinutes: 10 };
             }
             try {
-              return markToolResult(await this.config.mcp!.callTool(name, argumentsJson));
-            } catch {
-              return markToolResult({ ok: false, error: "mcp_unavailable" });
+              return markToolResult(mcpToolName, await this.config.mcp!.callTool(mcpToolName, mcpArgumentsJson));
+            } catch (error) {
+              return markToolResult(mcpToolName, { ok: false, error: "mcp_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined });
             }
           }
           try {
-            return markToolResult(await runtime.executor.execute(name, argumentsJson));
-          } catch {
-            return markToolResult({ ok: false, error: "tool_unavailable" });
+            return markToolResult(name, await runtime.executor.execute(name, argumentsJson));
+          } catch (error) {
+            return markToolResult(name, { ok: false, error: "tool_unavailable", detail: error instanceof Error ? error.message.slice(0, 300) : undefined });
           }
         },
       };
@@ -208,9 +348,9 @@ export class ConversationService {
         await this.store.saveConversation(conversation);
         return { text: "当前有其他成员发起的飞书操作待确认，只有发起人可以确认或取消。" };
       }
-      if (agentToolFailed) {
+      if (toolFailures.length) {
         await this.store.saveConversation(conversation);
-        return { text: "工具调用未成功，我没有把这次操作当作已完成。请检查权限或参数后重试。" };
+        return { text: formatToolFailures(toolFailures, successfulToolCalls > 0) };
       }
       if (agentResult?.text || agentResult?.usedTools) {
         await this.store.saveConversation(conversation);

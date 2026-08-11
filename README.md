@@ -54,7 +54,7 @@ Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-dep
 飞书 Base 同步和字段管理使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。`OWNER_OPEN_ID` 是唯一管理员身份来源；只有该用户可以执行删除列，且必须在机器人展示目标字段后回复“确认删除”。设置 `BASE_ADMIN_ENABLED=true` 开启聊天字段管理，设置 `FEISHU_BASE_TABLE_LABEL` 调整回复中的表名。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。字段管理与确认状态使用 PostgreSQL 持久化，因此开启 `BASE_ADMIN_ENABLED` 时必须配置 `DATABASE_URL`。
 
 启用 Agent-first 对话时设置 `LLM_ENABLED=true`、`LLM_AGENT_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。模型拿到当前消息、最近对话和需求草稿，自主决定是澄清问题，还是调用 `save_requirement_draft`、`submit_requirement`、需求查询、当前工作、管理员、Base 和 MCP 工具。工具不允许任意 shell/API 调用；正式需求提交、字段删除和 MCP 写操作仍由服务侧校验明确确认、管理员身份和权限。模型不可用时才回退到内置规则流程。`FEISHU_BASE_URL` 可配置完整 Base 链接；未配置时，若已有 `FEISHU_BASE_TOKEN` 和 `FEISHU_BASE_TABLE_ID`，服务会生成默认链接。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
-如需接入飞书官方远程 MCP，设置 `MCP_ENABLED=true`、`MCP_URL=https://mcp.feishu.cn/mcp`，并配置 `MCP_TAT` 或 `MCP_UAT`、`MCP_ALLOWED_TOOLS`。核心服务通过 MCP `tools/list` 动态加载工具，再把 `tools/call` 结果交给模型，不需要在代码中逐个手写飞书工具。官方远程 MCP 当前主要支持云文档；多维表格等其他域可连接项目内 Compose 的 `lark-mcp` profile。生产环境应配置与之相同的 `MCP_TOOL_ALLOWLIST`，只暴露业务需要的工具。涉及写入的 MCP 工具会先进入服务侧确认，发起人回复“确认执行”后才会真正调用，回复“取消操作”则清除待执行操作。
+启用项目内官方 MCP 时，设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`，并通过 `docker compose --profile mcp up -d` 启动。MCP 容器会加载已安装版本提供的完整飞书工具目录；核心服务不再维护第二套工具白名单。模型通过 `find_feishu_tools` 搜索真实工具和参数结构，再通过 `call_feishu_tool` 调用，因此不需要在代码或环境变量中逐个登记工具。涉及写入的 MCP 工具仍会先进入服务侧确认，发起人回复“确认执行”后才会真正调用，回复“取消操作”则清除待执行操作。
 
 管理接口：
 

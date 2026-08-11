@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exposedMcpToolName, isMcpMutationTool, isMcpToolAllowed, parseMcpToolAllowlist } from "../src/mcpClient.ts";
+import { exposedMcpToolName, isMcpMutationTool, mcpFailureDetail } from "../src/mcpClient.ts";
 
-test("parses MCP tool allowlists and blocks mutating tools by default", () => {
-  assert.deepEqual(parseMcpToolAllowlist("bitable_v1_app_get, bitable_v1_app_table_list"), new Set(["bitable_v1_app_get", "bitable_v1_app_table_list"]));
-  assert.equal(parseMcpToolAllowlist(""), undefined);
+test("holds mutating MCP tools for confirmation by default", () => {
   assert.equal(isMcpMutationTool("bitable_v1_app_table_field_delete"), true);
   assert.equal(isMcpMutationTool("bitable_v1_app_table_record_search"), false);
   assert.equal(isMcpMutationTool("rename-doc"), true);
@@ -23,8 +21,10 @@ test("normalizes remote MCP names and keeps collisions distinct", () => {
   assert.notEqual(dotted, underscored);
 });
 
-test("accepts both remote and exposed names in the MCP allowlist", () => {
-  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["bitable.v1.appTableRecord.search"])), true);
-  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["bitable_v1_appTableRecord_search"])), true);
-  assert.equal(isMcpToolAllowed("bitable.v1.appTableRecord.search", new Set(["docx_v1_document_get"])), false);
+test("preserves useful MCP business error details", () => {
+  assert.equal(
+    mcpFailureDetail([{ type: "text", text: "permission denied" }], { code: 99991672, msg: "forbidden" }),
+    'permission denied; {"code":99991672,"msg":"forbidden"}',
+  );
+  assert.equal(mcpFailureDetail([], undefined), undefined);
 });

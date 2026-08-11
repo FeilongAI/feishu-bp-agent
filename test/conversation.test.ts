@@ -117,13 +117,45 @@ test("does not trust the agent when a Feishu Base tool fails", async () => {
     async close() {},
   };
   const agent: AgentClient = {
-    async run(_input, _definitions, executor) {
-      await executor.execute("bitable_v1_appTableRecord_search", "{}");
+    async run(_input, definitions, executor) {
+      assert.ok(definitions.some((item) => item.function.name === "find_feishu_tools"));
+      assert.ok(definitions.some((item) => item.function.name === "call_feishu_tool"));
+      const found = await executor.execute("find_feishu_tools", JSON.stringify({ query: "Base 记录 search" }));
+      assert.equal((found as Record<string, unknown>).ok, true);
+      await executor.execute("call_feishu_tool", JSON.stringify({ toolName: "bitable_v1_appTableRecord_search", arguments: {} }));
       return { usedTools: true, text: "已成功查询多维表格。" };
     },
   };
   const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
-  assert.equal((await service.handleMessage(message("查询多维表格记录", "6f"))).text, "工具调用未成功，我没有把这次操作当作已完成。请检查权限或参数后重试。");
+  const reply = (await service.handleMessage(message("查询多维表格记录", "6f"))).text;
+  assert.match(reply, /bitable_v1_appTableRecord_search/);
+  assert.match(reply, /permission_denied/);
+  assert.match(reply, /应用权限/);
+  assert.doesNotMatch(reply, /已成功查询/);
+});
+
+test("reports MCP response details and does not mask a preceding successful tool", async () => {
+  const store = new InMemoryRequirementStore();
+  const mcp = {
+    async listTools() {
+      return [{ type: "function" as const, function: { name: "docx_v1_document_get", description: "读取文档", parameters: { type: "object", properties: {} } } }];
+    },
+    async callTool() { return { ok: false, error: "mcp_tool_failed", detail: "code=99991672 forbidden scope docx:document:readonly access_token=t-secret" }; },
+    async close() {},
+  };
+  const agent: AgentClient = {
+    async run(_input, _definitions, executor) {
+      await executor.execute("get_administrator", "{}");
+      await executor.execute("call_feishu_tool", JSON.stringify({ toolName: "docx_v1_document_get", arguments: {} }));
+      return { usedTools: true, text: "已经读取成功" };
+    },
+  };
+  const service = new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent, mcp });
+  const reply = (await service.handleMessage(message("读取文档", "6g"))).text;
+  assert.match(reply, /^部分工具调用已成功/);
+  assert.match(reply, /99991672/);
+  assert.match(reply, /docx:document:readonly/);
+  assert.doesNotMatch(reply, /t-secret/);
 });
 
 test("does not echo bot messages", async () => {
@@ -216,8 +248,12 @@ function mcpFixture() {
   };
   const agent: AgentClient = {
     async run(_input, definitions, executor) {
-      assert.ok(definitions.some((item) => item.function.name === "create-doc"));
-      const result = await executor.execute("create-doc", JSON.stringify({ title: "周报" }));
+      assert.ok(definitions.some((item) => item.function.name === "find_feishu_tools"));
+      assert.ok(definitions.some((item) => item.function.name === "call_feishu_tool"));
+      assert.ok(!definitions.some((item) => item.function.name === "create-doc"));
+      const search = await executor.execute("find_feishu_tools", JSON.stringify({ query: "创建 飞书 文档 create doc" }));
+      assert.equal((search as Record<string, unknown>).ok, true);
+      const result = await executor.execute("call_feishu_tool", JSON.stringify({ toolName: "create-doc", arguments: { title: "周报" } }));
       return { usedTools: true, text: result && typeof result === "object" && (result as Record<string, unknown>).confirmationRequired ? "文档已创建" : "已处理" };
     },
   };

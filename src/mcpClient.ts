@@ -6,14 +6,11 @@ import type { AgentToolDefinition } from "./understanding.ts";
 
 export interface McpClientConfig {
   url: string;
-  toolAllowlist?: Set<string>;
   authToken?: string;
   authType?: "uat" | "tat";
-  allowedTools?: Set<string>;
   appId?: string;
   appSecret?: string;
   apiBaseUrl?: string;
-  maxTools?: number;
   timeoutMs?: number;
 }
 
@@ -47,12 +44,8 @@ export function exposedMcpToolName(remoteName: string, usedNames = new Map<strin
   return exposed;
 }
 
-export function isMcpToolAllowed(remoteName: string, allowlist?: Set<string>): boolean {
-  return !allowlist || allowlist.has(remoteName) || allowlist.has(exposedMcpToolName(remoteName));
-}
-
 export class LarkMcpClient implements McpToolProvider {
-  private readonly config: Required<Omit<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">> & Pick<McpClientConfig, "toolAllowlist" | "authToken" | "authType" | "allowedTools" | "appId" | "appSecret" | "apiBaseUrl">;
+  private readonly config: Required<Omit<McpClientConfig, "authToken" | "authType" | "appId" | "appSecret" | "apiBaseUrl">> & Pick<McpClientConfig, "authToken" | "authType" | "appId" | "appSecret" | "apiBaseUrl">;
   private readonly logger: Logger;
   private client?: Client;
   private transport?: StreamableHTTPClientTransport;
@@ -65,14 +58,11 @@ export class LarkMcpClient implements McpToolProvider {
     if (!config.url.trim()) throw new Error("MCP_URL is required when MCP_ENABLED=true");
     this.config = {
       url: config.url,
-      toolAllowlist: config.toolAllowlist,
       authToken: config.authToken,
       authType: config.authType,
-      allowedTools: config.allowedTools,
       appId: config.appId,
       appSecret: config.appSecret,
       apiBaseUrl: config.apiBaseUrl || "https://open.feishu.cn/open-apis",
-      maxTools: Number.isFinite(config.maxTools) ? Math.max(1, Math.min(Math.trunc(config.maxTools!), 200)) : 80,
       timeoutMs: Number.isFinite(config.timeoutMs) ? Math.max(500, Math.min(Math.trunc(config.timeoutMs!), 60_000)) : 15_000,
     };
     this.logger = logger;
@@ -85,11 +75,10 @@ export class LarkMcpClient implements McpToolProvider {
       await this.close();
       throw error;
     });
-    const allowed = this.config.toolAllowlist;
     this.tools = result.tools
-      .filter((tool) => typeof tool.name === "string" && isMcpToolAllowed(tool.name, allowed))
-      .slice(0, this.config.maxTools)
+      .filter((tool) => typeof tool.name === "string")
       .map((tool) => this.toAgentDefinition(tool as McpToolShape));
+    this.logger.info("mcp_tools_discovered", { count: this.tools.length });
     return this.tools;
   }
 
@@ -101,12 +90,13 @@ export class LarkMcpClient implements McpToolProvider {
     try {
       const remoteName = this.exposedToRemoteName.get(name) ?? name;
       const result = await this.client!.callTool({ name: remoteName, arguments: args as Record<string, unknown> });
-      if (result.isError === true) this.logger.warn("mcp_tool_failed", { tool: name, reason: "remote_tool_error" });
+      const failureDetail = result.isError === true ? mcpFailureDetail(result.content, result.structuredContent) : undefined;
+      if (result.isError === true) this.logger.warn("mcp_tool_failed", { tool: name, reason: "remote_tool_error", detail: failureDetail });
       return {
         ok: result.isError !== true,
         content: result.content,
         structuredContent: result.structuredContent,
-        ...(result.isError === true ? { error: "mcp_tool_failed" } : {}),
+        ...(result.isError === true ? { error: "mcp_tool_failed", detail: failureDetail } : {}),
       };
     } catch (error) {
       this.logger.warn("mcp_tool_call_failed", { tool: name, reason: error instanceof Error ? error.name : "unknown" });
@@ -133,7 +123,6 @@ export class LarkMcpClient implements McpToolProvider {
           const headers = new Headers(init?.headers);
           const authToken = await this.authToken();
           if (authToken && this.config.authType) headers.set(`X-Lark-MCP-${this.config.authType.toUpperCase()}`, authToken);
-          if (this.config.allowedTools?.size) headers.set("X-Lark-MCP-Allowed-Tools", [...this.config.allowedTools].join(","));
           return fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.config.timeoutMs) });
         },
       });
@@ -185,7 +174,18 @@ export class LarkMcpClient implements McpToolProvider {
   }
 }
 
-export function parseMcpToolAllowlist(value: string | undefined): Set<string> | undefined {
-  const names = value?.split(",").map((item) => item.trim()).filter(Boolean);
-  return names?.length ? new Set(names) : undefined;
+export function mcpFailureDetail(content: unknown, structuredContent: unknown): string | undefined {
+  const values: string[] = [];
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (!item || typeof item !== "object") continue;
+      const itemText = (item as Record<string, unknown>).text;
+      if (typeof itemText === "string" && itemText.trim()) values.push(itemText.trim());
+    }
+  }
+  if (structuredContent && typeof structuredContent === "object") {
+    try { values.push(JSON.stringify(structuredContent)); } catch { /* diagnostic data can be non-serializable */ }
+  }
+  const detail = values.join("; ").replace(/\s+/g, " ").trim();
+  return detail ? detail.slice(0, 800) : undefined;
 }

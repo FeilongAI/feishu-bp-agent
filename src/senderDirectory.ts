@@ -1,7 +1,7 @@
 import type { Logger } from "./logger.ts";
 import type { McpToolProvider } from "./mcpClient.ts";
 import { MAX_MESSAGE_NAME_CHARS, type IncomingMessage } from "./types.ts";
-import type { AgentToolDefinition } from "./understanding.ts";
+import type { AgentToolDefinition } from "./agent.ts";
 
 export interface SenderDirectory {
   enrich(message: IncomingMessage): Promise<IncomingMessage>;

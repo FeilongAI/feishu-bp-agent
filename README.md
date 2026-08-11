@@ -1,6 +1,6 @@
 # feishu-bp-agent
 
-飞书 BP 需求收集与工作进度播报智能体 MVP。
+飞书 BP 需求收集、排期协作与工作进度播报智能体。
 
 当前版本包含：
 
@@ -16,7 +16,7 @@
 - JSON 结构化日志与敏感字段脱敏
 - PostgreSQL outbox 驱动的飞书 Base 可靠同步
 - 管理员通过聊天查询身份，并在确认后删除 Base 字段
-- 可选的 LLM 工具调用模式：模型判断是否查询需求、进展、管理员或 Base，并通过受控工具取数
+- v2 大模型对话核心：模型负责理解意图、多轮澄清、规划和工具选择，应用不再包含关键词分类器
 - 可选的飞书官方远程 MCP 桥接：按服务端返回的工具定义动态发现和调用，不在本项目逐个手写飞书工具
 
 ## Run
@@ -53,7 +53,7 @@ Docker 手动构建与实例创建参见 [docs/docker-deploy.md](docs/docker-dep
 
 飞书 Base 同步和字段管理使用应用身份直连 OpenAPI，不依赖个人 `lark-cli` 登录态。`OWNER_OPEN_ID` 是唯一管理员身份来源；只有该用户可以执行删除列，且必须在机器人展示目标字段后回复“确认删除”。设置 `BASE_ADMIN_ENABLED=true` 开启聊天字段管理，设置 `FEISHU_BASE_TABLE_LABEL` 调整回复中的表名。Base 字段、权限和环境变量参见 [docs/feishu-base-sync.md](docs/feishu-base-sync.md)。字段管理与确认状态使用 PostgreSQL 持久化，因此开启 `BASE_ADMIN_ENABLED` 时必须配置 `DATABASE_URL`。
 
-启用 Agent-first 对话时设置 `LLM_ENABLED=true`、`LLM_AGENT_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。模型拿到当前消息、最近对话和需求草稿，自主决定是澄清问题，还是调用 `save_requirement_draft`、`submit_requirement`、需求查询、当前工作、管理员、Base 和 MCP 工具。工具不允许任意 shell/API 调用；正式需求提交、字段删除和 MCP 写操作仍由服务侧校验明确确认、管理员身份和权限。模型不可用时才回退到内置规则流程。`FEISHU_BASE_URL` 可配置完整 Base 链接；未配置时，若已有 `FEISHU_BASE_TOKEN` 和 `FEISHU_BASE_TABLE_ID`，服务会生成默认链接。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。详细部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
+v2 必须设置 `LLM_ENABLED=true`，并配置 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。模型拿到当前消息、最近对话和需求草稿，自主决定是继续对话，还是调用需求、进展、管理员、Base 和 MCP 工具。应用只负责身份、权限、幂等、并发锁和高风险操作确认，不包含关键词分类器；模型不可用时会明确报错，不会切换到规则流程。正式需求提交、字段删除和 MCP 写操作仍由服务端校验，工具失败也不会被回复成成功。`FEISHU_BASE_URL` 可配置完整 Base 链接；未配置时，若已有 `FEISHU_BASE_TOKEN` 和 `FEISHU_BASE_TABLE_ID`，服务会生成默认链接。`LLM_TIMEOUT_MS`、`LLM_MAX_RETRIES`、`LLM_MAX_INPUT_CHARS` 分别控制超时、瞬时错误重试次数和发送给模型的最大上下文。架构说明参见 [docs/v2-architecture.md](docs/v2-architecture.md)，部署说明参见 [docs/docker-deploy.md](docs/docker-deploy.md)。
 启用项目内官方 MCP 时，设置 `MCP_ENABLED=true`、`MCP_URL=http://lark-mcp:3000/mcp`，并通过 `docker compose --profile mcp up -d` 启动。MCP 容器会加载已安装版本提供的完整飞书工具目录；核心服务不再维护第二套工具白名单。模型通过 `find_feishu_tools` 搜索真实工具和参数结构，再通过 `call_feishu_tool` 调用，因此不需要在代码或环境变量中逐个登记工具。涉及写入的 MCP 工具仍会先进入服务侧确认，发起人回复“确认执行”后才会真正调用，回复“取消操作”则清除待执行操作。
 
 管理接口：
@@ -71,6 +71,6 @@ curl -X POST http://127.0.0.1:8090/api/admin/confirmations \
 
 群聊默认只有明确 `@` 当前机器人时才处理。生产环境应至少配置 `BOT_OPEN_ID`，并按需设置 `ALLOWED_TENANT_KEYS`、`ALLOWED_USER_IDS`、`ALLOWED_CHAT_IDS`（逗号分隔）；空白名单表示不限制该维度。
 
-## Conversation rules
+## Security boundaries
 
-The agent never creates a formal requirement from an unconfirmed draft. It asks for the business goal, scope, and acceptance criteria, then waits for an explicit confirmation. LLM output is advisory structured data only; confirmation and persistence remain deterministic application logic.
+The model owns the conversation and may call any tool exposed by the service. Application code still validates requirement ownership and explicit submission, permissions, high-risk confirmations, idempotency, and concurrency. A tool result with `ok != true` can never be presented as a completed operation.

@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHash } from "node:crypto";
 import type { Logger } from "./logger.ts";
-import type { AgentToolDefinition } from "./understanding.ts";
+import type { AgentToolDefinition } from "./agent.ts";
 
 export interface McpClientConfig {
   url: string;

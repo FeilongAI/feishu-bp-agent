@@ -8,6 +8,7 @@ import { MessageProcessor } from "../src/messageProcessor.ts";
 import { InMemoryRequirementStore } from "../src/store.ts";
 import type { ConversationState, IncomingMessage } from "../src/types.ts";
 import type { SenderDirectory } from "../src/senderDirectory.ts";
+import type { AgentClient } from "../src/agent.ts";
 
 const silentLogger: Logger = { info() {}, warn() {}, error() {} };
 const permissions = {
@@ -28,7 +29,19 @@ const message = (content: string, id: string): IncomingMessage => ({
 
 test("deduplicates a confirmation message and returns its stored reply", async () => {
   const store = new InMemoryRequirementStore();
-  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), permissions, silentLogger);
+  const agent: AgentClient = {
+    async run(input, _definitions, executor) {
+      if (input.message === "确认提交") {
+        const result = await executor.execute("submit_requirement", "{}");
+        return { usedTools: true, text: `已提交 ${(result as Record<string, unknown>).requirementId}` };
+      }
+      await executor.execute("save_requirement_draft", JSON.stringify({
+        title: "Meta 看板", goal: "查看消耗和回收", scope: "游戏、国家和账户", acceptanceCriteria: "看到 D0 ROAS",
+      }));
+      return { usedTools: true, text: "需求草稿已更新" };
+    },
+  };
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent }), permissions, silentLogger);
   await processor.process(message("我想做一个 Meta 看板", "1"));
   await processor.process(message("目标是看每天的消耗和回收", "2"));
   await processor.process(message("范围包含游戏、国家和账户", "3"));
@@ -55,14 +68,18 @@ test("serializes concurrent messages in the same conversation", async () => {
     }
   }
   const store = new SlowStore();
-  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), permissions, silentLogger);
+  const agent: AgentClient = { async run() { return { usedTools: false, text: "已收到" }; } };
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent }), permissions, silentLogger);
   await Promise.all([
     processor.process(message("我想做 Meta 看板", "10")),
     processor.process(message("目标是分析每天消耗", "11")),
   ]);
   assert.equal(store.maxActiveSaves, 1);
   const state = await store.getConversation("oc_demo:ou_requester:main");
-  assert.deepEqual(state?.recentMessages, ["我想做 Meta 看板", "目标是分析每天消耗"]);
+  assert.deepEqual(state?.recentMessages, [
+    "用户（ou_requester）：我想做 Meta 看板", "助手：已收到",
+    "用户（ou_requester）：目标是分析每天消耗", "助手：已收到",
+  ]);
 });
 
 test("does not let sender-name lookup latency reorder group messages", async () => {
@@ -73,7 +90,13 @@ test("does not let sender-name lookup latency reorder group messages", async () 
       return { ...value, senderName: value.senderId === "ou_first" ? "甲" : "乙" };
     },
   };
-  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙" }), { ...permissions, groupRequireMention: false }, silentLogger, directory);
+  const agent: AgentClient = {
+    async run(input, _definitions, executor) {
+      await executor.execute("save_requirement_draft", JSON.stringify({ title: input.message }));
+      return { usedTools: true, text: "已记录" };
+    },
+  };
+  const processor = new MessageProcessor(store, new ConversationService(store, { ownerId: "ou_owner", ownerName: "韩飞龙", agent }), { ...permissions, groupRequireMention: false }, silentLogger, directory);
   const group = (senderId: string, id: string, content: string): IncomingMessage => ({ ...message(content, id), senderId, chatType: "group" });
 
   const first = processor.process(group("ou_first", "order-1", "我想做第一个 Meta 看板"));

@@ -23,7 +23,7 @@ BOT_OPEN_ID=ou_your_bot_open_id
 
 Use URL-safe alphanumeric database passwords in Compose, or percent-encode reserved URI characters in `DATABASE_URL`. Production startup rejects missing values and example placeholders.
 
-To enable semantic requirement understanding, add an OpenAI-compatible provider:
+Production v2 requires an OpenAI-compatible provider:
 
 ```dotenv
 LLM_ENABLED=true
@@ -34,7 +34,7 @@ LLM_MODEL=your_model_name
 
 The provider must implement `POST /chat/completions` and tool calling. Keep `LLM_API_KEY` only in the server environment. Requirement messages and a bounded amount of recent conversation context are sent to this provider, so choose the provider and data-retention policy according to your privacy requirements. Timeout, retry and context limits have production defaults in code and only need environment overrides for advanced tuning.
 
-When agent mode is enabled, the model owns the conversation loop. It receives the current message, recent context, and draft, then decides whether to ask a question or call a BP tool. For Feishu operations it searches the live MCP catalog with `find_feishu_tools`, then invokes the selected tool through `call_feishu_tool`. The service executes tools and sends results back to the model. Requirement submission, Base field deletion, MCP mutation confirmation, permissions, idempotency, and locks remain service-side security boundaries.
+Production startup fails when `LLM_ENABLED` is not `true`, or when `LLM_API_KEY` / `LLM_MODEL` is empty. There is no keyword classifier or built-in conversational fallback. The model owns the conversation loop: it receives the current message, recent context, and draft, then decides whether to ask a question or call a BP tool. For Feishu operations it searches the live MCP catalog with `find_feishu_tools`, then invokes the selected tool through `call_feishu_tool`. The service executes tools and sends results back to the model. Requirement submission, Base field deletion, MCP mutation confirmation, permissions, idempotency, and locks remain service-side security boundaries.
 
 ## Official Lark MCP bridge
 

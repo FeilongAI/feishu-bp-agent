@@ -7,7 +7,7 @@ import type { McpToolProvider } from "../src/mcpClient.ts";
 import { buildContactLookupArguments, extractMcpSenderName, McpSenderDirectory } from "../src/senderDirectory.ts";
 import { InMemoryRequirementStore } from "../src/store.ts";
 import type { ConversationState, IncomingMessage } from "../src/types.ts";
-import type { AgentClient, AgentInput, AgentToolDefinition } from "../src/understanding.ts";
+import type { AgentClient, AgentInput, AgentToolDefinition } from "../src/agent.ts";
 
 const silentLogger: Logger = { info() {}, warn() {}, error() {} };
 const contactTool = (parameters: Record<string, unknown>, name = "contact_v3_user_get"): AgentToolDefinition => ({

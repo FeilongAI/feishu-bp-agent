@@ -11,7 +11,7 @@ import { MessageProcessor } from "./messageProcessor.ts";
 import { csvSet } from "./permissions.ts";
 import { PostgresRequirementStore } from "./postgres.ts";
 import { InMemoryRequirementStore } from "./store.ts";
-import { OpenAICompatibleAgentClient, OpenAICompatibleUnderstandingClient } from "./understanding.ts";
+import { OpenAICompatibleAgentClient } from "./agent.ts";
 import { LarkMcpClient } from "./mcpClient.ts";
 import { McpSenderDirectory } from "./senderDirectory.ts";
 
@@ -21,6 +21,11 @@ const auth = {
 };
 validateAuthConfig(auth);
 
+const llmEnabled = process.env.LLM_ENABLED === "true";
+if (process.env.NODE_ENV === "production" && !llmEnabled) {
+  throw new Error("Production requires LLM_ENABLED=true; v2 has no rule-based conversation fallback");
+}
+
 if (process.env.NODE_ENV === "production") {
   const productionSecrets = {
     ADMIN_API_KEY: auth.adminApiKey,
@@ -28,7 +33,8 @@ if (process.env.NODE_ENV === "production") {
     CONFIRMATION_SECRET: process.env.CONFIRMATION_SECRET || "",
     DATABASE_URL: process.env.DATABASE_URL || "",
     ...(process.env.BASE_SYNC_ENABLED === "true" || process.env.BASE_ADMIN_ENABLED === "true" ? { FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || "" } : {}),
-    ...(process.env.LLM_ENABLED === "true" ? { LLM_API_KEY: process.env.LLM_API_KEY || "" } : {}),
+    LLM_API_KEY: process.env.LLM_API_KEY || "",
+    LLM_MODEL: process.env.LLM_MODEL || "",
     ...(process.env.NODE_ENV === "production" ? { INGRESS_EVENT_SECRET: process.env.INGRESS_EVENT_SECRET || "" } : {}),
   };
   const invalid = Object.entries(productionSecrets)
@@ -61,18 +67,7 @@ if (baseSyncEnabled || baseAdminEnabled) {
     requestTimeoutMs: Number(process.env.FEISHU_API_TIMEOUT_MS || 15_000),
   });
 }
-const agentEnabled = process.env.LLM_ENABLED === "true" && process.env.LLM_AGENT_ENABLED !== "false";
-const understanding = process.env.LLM_ENABLED === "true" && !agentEnabled
-  ? new OpenAICompatibleUnderstandingClient({
-    baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
-    apiKey: process.env.LLM_API_KEY || "",
-    model: process.env.LLM_MODEL || "",
-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 8_000),
-    maxRetries: Number(process.env.LLM_MAX_RETRIES || 1),
-    maxInputChars: Number(process.env.LLM_MAX_INPUT_CHARS || 6_000),
-  }, logger)
-  : undefined;
-const agent = agentEnabled
+const agent = llmEnabled
   ? new OpenAICompatibleAgentClient({
     baseUrl: process.env.LLM_BASE_URL || "https://api.openai.com/v1",
     apiKey: process.env.LLM_API_KEY || "",
@@ -101,7 +96,7 @@ const service = new ConversationService(store, {
   baseUrl,
   agent,
   mcp,
-}, understanding);
+});
 const senderDirectory = mcp
   ? new McpSenderDirectory(mcp, logger, {
     cacheTtlMs: Number(process.env.SENDER_NAME_CACHE_TTL_MS || 86_400_000),

@@ -1,6 +1,6 @@
 import type { BaseFieldAdmin } from "./feishuBase.ts";
 import { canViewRequirement } from "./requirementVisibility.ts";
-import type { AgentToolDefinition, AgentToolExecutor } from "./understanding.ts";
+import type { AgentToolDefinition, AgentToolExecutor } from "./agent.ts";
 import type { ConversationState, IncomingMessage, RequirementStore } from "./types.ts";
 
 export interface AgentToolContext {
@@ -177,11 +177,14 @@ export function createAgentToolRuntime(context: AgentToolContext): AgentToolRunt
             await context.store.saveConversation(context.conversation);
             return { ok: true, requirementId: requirement.id, status: requirement.status };
           }
-          case "clear_requirement_draft":
+          case "clear_requirement_draft": {
             if (!/^(取消|放弃|清空)(当前)?需求/.test(context.message.content.trim())) return { ok: false, error: "explicit_cancellation_required" };
+            const draft = context.conversation.draft;
+            if (!draft || draft.requesterId !== context.message.senderId) return { ok: false, error: "no_owned_requirement_draft" };
             delete context.conversation.draft;
             await context.store.saveConversation(context.conversation);
             return { ok: true };
+          }
           case "get_requirement_table_link":
             return context.baseUrl
               ? { ok: true, label: context.baseTableLabel, url: context.baseUrl }
@@ -206,6 +209,7 @@ export function createAgentToolRuntime(context: AgentToolContext): AgentToolRunt
           case "request_delete_base_field": {
             if (context.message.senderId !== context.ownerId) return { ok: false, error: "admin_only" };
             if (!context.baseAdmin) return { ok: false, error: "base_admin_not_enabled", setup: "设置 BASE_ADMIN_ENABLED=true 后重启服务" };
+            if (context.conversation.pendingBaseFieldDelete) return { ok: false, error: "base_confirmation_already_pending" };
             const fieldName = typeof args.fieldName === "string" ? args.fieldName.trim().slice(0, 200) : "";
             if (!fieldName) return { ok: false, error: "field_name_required" };
             const fields = await context.baseAdmin.listFields().catch(() => []);

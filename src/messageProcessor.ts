@@ -53,7 +53,7 @@ export class MessageProcessor {
             return message;
           })
           : message;
-        const lockedService = new ConversationService(lockedStore, this.service.config, this.service.understanding);
+        const lockedService = new ConversationService(lockedStore, this.service.config);
         const reply = await lockedService.handleMessage(enrichedMessage);
         await lockedStore.completeMessage(enrichedMessage.messageId, reply);
         return reply;
